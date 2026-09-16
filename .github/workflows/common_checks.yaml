@@ -1,0 +1,213 @@
+name: main_workflow
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lock_check:
+    continue-on-error: False
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+        python-version: ["3.10"]
+
+    defaults:
+      run:
+        shell: bash
+
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Check if dependencies can be locked
+        run: uv lock --check
+      - name: Install dependencies
+        run: uv sync --all-groups -v
+
+  copyright_and_dependencies_check:
+    continue-on-error: False
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-24.04]
+        python-version: ["3.10"]
+
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0' tox-uv
+      - name: Check copyright headers
+        run: tomte check-copyright --author valory
+      - name: License compatibility check
+        run: tomte tox -e liccheck
+      - name: Check dependencies
+        run: tomte tox -e check-dependencies
+      - name: Check third-party package hashes match upstream
+        run: tomte tox -e check-third-party-hashes
+      - name: Check doc IPFS hashes
+        run: tomte tox -e check-doc-hashes
+
+  linter_checks:
+    continue-on-error: False
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-24.04]
+        python-version: ["3.10"]
+
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0' tox-uv
+      - name: Security checks
+        env:
+          # nltk 3.10.1 (pulled in transitively by `safety`) installs an import
+          # hook that refuses any nltk-initiated import resolving INSIDE the
+          # current working directory. tox puts its venvs in `.tox/` at the
+          # repo root, so `regex` -- a normal site-packages dependency -- counts
+          # as "in the CWD" and `safety` dies on import before it can check
+          # anything. The hook's own suggestion (PYTHONSAFEPATH) does not help:
+          # it blocks on the module's resolved ORIGIN, not on sys.path. Moving
+          # the venvs out of the repo is what actually satisfies it.
+          TOX_WORK_DIR: ${{ runner.temp }}/tox
+        run: tomte tox -p -e safety -e bandit
+      - name: Check packages
+        run: tomte tox -e check-packages
+      - name: Check hash
+        run: tomte tox -e check-hash
+      - name: Code checks
+        run: tomte tox -p -e black-check -e isort-check -e flake8 -e mypy -e pylint -e darglint
+      - name: AbciApp consistency checks
+        run: |
+          tomte tox -e check-abci-docstrings
+          tomte tox -e check-abciapp-specs
+          tomte tox -e check-handlers
+
+  scan:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - run: |
+          wget https://github.com/zricethezav/gitleaks/releases/download/v8.10.1/gitleaks_8.10.1_linux_x64.tar.gz
+          tar -xzf gitleaks_8.10.1_linux_x64.tar.gz
+          sudo install gitleaks /usr/bin
+          pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0' tox-uv
+          tomte tox -e gitleaks
+
+  test:
+    continue-on-error: False
+    needs:
+      - lock_check
+      - copyright_and_dependencies_check
+      - linter_checks
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - if: matrix.os == 'ubuntu-24.04'
+        name: Install dependencies (ubuntu-24.04)
+        run: |
+          sudo apt-get update --fix-missing
+          sudo apt-get autoremove
+          sudo apt-get autoclean
+          pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0' tox-uv
+          pip install --user --upgrade setuptools
+
+      - if: matrix.os == 'ubuntu-24.04'
+        name: Packages unit tests ubuntu-24.04
+        run: |
+          tomte tox -e py${{ matrix.python-version }}-linux
+
+      - if: matrix.os == 'macos-15'
+        name: Install dependencies (macos-15)
+        run: |
+          pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0' tox-uv
+          pip install --user --upgrade setuptools
+
+      - if: matrix.os == 'macos-15'
+        name: Packages unit tests macos-15
+        run: |
+          tomte tox -e py${{ matrix.python-version }}-darwin
+
+      - if: matrix.os == 'windows-2025'
+        name: Install dependencies (windows-2025)
+        run: |
+          python -m pip install -U pip
+          pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0' tox-uv
+          pip install --upgrade setuptools
+
+      - if: matrix.os == 'windows-2025'
+        name: Packages unit tests windows-2025
+        run: |
+          tomte tox -e py${{ matrix.python-version }}-win
+
+      - if: matrix.os == 'ubuntu-24.04'
+        name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+  all_checks_passed:
+    name: All checks passed
+    if: always()
+    needs:
+      - lock_check
+      - copyright_and_dependencies_check
+      - linter_checks
+      - scan
+      - test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fail if any required job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
+      - run: echo "All required checks passed."
