@@ -1,0 +1,82 @@
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12.0"]
+build-backend = "uv_build"
+
+[project]
+name = "mech-social"
+version = "0.1.0"
+description = "Mech tools that interact with social media APIs such as X"
+requires-python = ">=3.10,<3.15"
+readme = "README.md"
+license = "Apache-2.0"
+dependencies = [
+    # OA / open-aea / plugins: pinned exactly (framework contract).
+    "open-autonomy[all]==0.21.26",
+    "open-aea-ledger-ethereum==2.2.9",
+    "open-aea-ledger-cosmos==2.2.9",
+    "open-aea-test-autonomy==0.21.26",
+    "open-aea-cli-ipfs==2.2.9",
+    "open-aea-helpers==0.21.26",
+    # Agent-repo (app) deps: exact pins. Ranges are reserved for
+    # framework/lib repos; agent repos pin everything non-OA throughout.
+    "requests==2.32.5",
+    "grpcio==1.78.0",
+    "asn1crypto<1.5.0,>=1.4.0",
+    "hypothesis==6.21.6",
+    "web3<8,>=7.15.0",
+    "pytest-asyncio==1.3.0",
+    "aiohttp<4.0.0,>=3.8.5",
+    "certifi==2026.2.25",
+    "multidict==6.7.1",
+    "ecdsa>=0.15",
+    "py-ecc<10,>=8",
+    "websocket_client<1,>=0.32.0",
+    "pytest>=8.2,<10",
+    "openapi-core==0.22.0",
+    "prometheus-client>=0.23.1,<0.24",
+    "pebble==5.1.3",
+    "python-dotenv==0.21.1",
+    # Transitive via open-aea-ledger-solana. Unpinned, tox envs resolve the
+    # httpx 1.0 dev prerelease, which ships no license metadata.
+    "httpx==0.28.1",
+]
+
+[project.urls]
+Repository = "https://github.com/valory-xyz/mech-social"
+
+[dependency-groups]
+dev = [
+    "tomte[cli, tests] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0",
+]
+
+[tool.uv]
+default-groups = "all"
+# cffi 2.1.0 (transitive via cryptography << open-aea-ledger-solana)
+# reports its license as MIT-0, which tomte's PARANOID liccheck rejects.
+# Constrain to the previous minor until the tomte allowlist covers MIT-0.
+override-dependencies = ["cffi<2.1"]
+
+[tool.tomte]
+# Dev customs will live under packages/<author>/customs/; the agent and
+# service live under packages/valory/. Pin packages_paths to the primary
+# first-party author so the env vars the canonical envs export resolve.
+packages_paths = "packages/valory"
+# tests/ is first-party Python at the repo root. Listing it also gives the
+# linters a target while the repo has no dev customs yet.
+service_specific_packages_extra = ["tests"]
+# The only first-party tests live under tests/; without pinning,
+# auto-discovery picks up upstream packages/valory/skills/.../tests/
+# whose tendermint-binary deps don't apply downstream.
+pytest_targets = ["tests"]
+# Third-party skills/contracts on disk are synced from mech upstream;
+# tomte auto-prepends valory-xyz/open-autonomy@... and open-aea@...
+# from pyproject pins, so only the non-PyPI upstreams need listing.
+upstream_pins = [
+    "valory-xyz/mech@v0.35.6",
+    "valory-xyz/kv-store@v0.7.1",
+]
+tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@v0.7.0"
+
+[tool.uv.build-backend]
+module-name = ["packages"]
+module-root = ""
