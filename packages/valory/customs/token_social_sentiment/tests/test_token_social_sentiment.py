@@ -34,6 +34,7 @@ ADDRESS = "0x6982508145454ce325ddbe47a25d4ec3d2311933"
 OTHER_ADDRESS = "0x3731dDC63193a467bb787dca468eDB6C4d288e6e"
 SOL_ADDRESS = "6twWA5PN3D3BeMmEZwoNkmKDrMLSZQxrXqcfZpvUEyz4"
 KEYS = {"openai": "sk", "serperapi": "serper", "x_bearer": "x"}
+PEPE_PROMPT = json.dumps({"symbol": "PEPE", "address": ADDRESS})
 
 
 def _posts(n: int) -> List[Dict[str, Any]]:
@@ -56,12 +57,14 @@ def _labels(
     bullish: Optional[List[str]] = None,
     neutral: Optional[List[str]] = None,
     bearish: Optional[List[str]] = None,
+    off_topic: Optional[List[str]] = None,
 ) -> tool.ItemLabels:
     """Build LLM labels."""
     return tool.ItemLabels(
         bullish=bullish or [],
         neutral=neutral or [],
         bearish=bearish or [],
+        off_topic=off_topic or [],
         reasoning="Listing news; one rug warning.",
     )
 
@@ -86,7 +89,7 @@ def stubs() -> Any:
     labels = _labels(
         bullish=["p1", "p2", "p3", "p4", "n1"], neutral=["p5", "p6"], bearish=["p7"]
     )
-    token = {"symbol": "PEPE", "chain": "ethereum", "volume": 100.0}
+    token = {"symbol": "PEPE", "chain": "ethereum", "volume": 100.0, "fdv": 1e6}
     with (
         patch.object(tool, "OpenAI"),
         patch.object(tool, "resolve_token", return_value=token) as resolve,
@@ -147,7 +150,7 @@ def test_post_text_cleaned_before_scoring(stubs: Dict[str, MagicMock]) -> None:
     posts = _posts(1)
     posts[0]["text"] = f"buy &amp; hold {ADDRESS.upper()} https://t.co/x"
     stubs["x"].return_value = (posts, 1, [])
-    _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    _run(PEPE_PROMPT)
     assert stubs["score"].call_args.args[3][0]["text"] == "buy & hold [CA]"
 
 
@@ -250,7 +253,12 @@ def test_window_clamped(
 
 def test_address_wins_on_symbol_and_chain_mismatch(stubs: Dict[str, MagicMock]) -> None:
     """The address's own symbol and chain replace mismatching inputs."""
-    stubs["resolve"].return_value = {"symbol": "PEPE2", "chain": "base", "volume": 1.0}
+    stubs["resolve"].return_value = {
+        "symbol": "PEPE2",
+        "chain": "base",
+        "volume": 1.0,
+        "fdv": 0.0,
+    }
     result = _run(
         json.dumps({"symbol": "PEPE", "address": ADDRESS, "chain": "ethereum"})
     )
@@ -265,7 +273,7 @@ def test_token_lookup_failure_is_degraded_and_noted(
 ) -> None:
     """A DexScreener failure is reported, not silently read as 'not shared'."""
     stubs["resolve"].return_value = None
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert result["error"] is None
     assert result["degraded_sources"] == ["dexscreener"]
     assert "Token lookup failed" in result["reasoning"]
@@ -277,7 +285,7 @@ def test_share_lookup_failure_is_degraded_and_noted(
 ) -> None:
     """A failed ticker-share search keeps the broad query and says so."""
     stubs["volumes"].return_value = None
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert result["degraded_sources"] == ["dexscreener"]
     assert "Ticker share unknown" in result["reasoning"]
     assert stubs["x"].call_args.args[1].startswith("($PEPE OR")
@@ -295,6 +303,7 @@ def test_shared_ticker_narrows_search(
         "symbol": "FUN",
         "chain": "robinhood",
         "volume": 100.0,
+        "fdv": 38_000.0,
     }
     stubs["volumes"].return_value = {"0xother": others, ADDRESS: 100.0}
     _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
@@ -313,6 +322,7 @@ def test_share_exactly_at_threshold_is_not_narrowed(
         "symbol": "FUN",
         "chain": "robinhood",
         "volume": 25.0,
+        "fdv": 38_000.0,
     }
     stubs["volumes"].return_value = {"0xother": 75.0}
     _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
@@ -321,7 +331,12 @@ def test_share_exactly_at_threshold_is_not_narrowed(
 
 def test_shared_ticker_without_chain_uses_address(stubs: Dict[str, MagicMock]) -> None:
     """No chain known: X and news both search by address, with a note."""
-    stubs["resolve"].return_value = {"symbol": "FUN", "chain": None, "volume": 0.0}
+    stubs["resolve"].return_value = {
+        "symbol": "FUN",
+        "chain": None,
+        "volume": 0.0,
+        "fdv": 0.0,
+    }
     stubs["volumes"].return_value = {"0xother": 500.0}
     result = _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
     assert stubs["x"].call_args.args[1] == f'("{ADDRESS}") -is:retweet'
@@ -355,7 +370,7 @@ def test_one_source_failing_continues(stubs: Dict[str, MagicMock]) -> None:
     stubs["score"].return_value = _labels(
         bullish=["n1", "n2", "n3"], neutral=["n4", "n5"]
     )
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert result["error"] is None
     assert result["posts_analyzed"] == 0
     assert result["breakdown"] == {"bullish": 3, "neutral": 2, "bearish": 0}
@@ -368,7 +383,7 @@ def test_news_failing_while_x_works(stubs: Dict[str, MagicMock]) -> None:
     """Serper failing still scores from X and flags news."""
     stubs["news"].side_effect = requests.HTTPError("401")
     stubs["score"].return_value = _labels(bullish=["p1", "p2", "p3", "p4", "p5"])
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert result["sentiment"] == 1.0
     assert result["degraded_sources"] == ["news"]
     assert "news unavailable" in result["reasoning"]
@@ -377,7 +392,7 @@ def test_news_failing_while_x_works(stubs: Dict[str, MagicMock]) -> None:
 def test_x_partial_and_counts_degradation_reported(stubs: Dict[str, MagicMock]) -> None:
     """Degraded sources from the X fetch reach the output."""
     stubs["x"].return_value = (_posts(8), None, ["x_partial", "x_counts"])
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert result["degraded_sources"] == ["x_partial", "x_counts"]
     assert result["mentions"] is None
 
@@ -385,7 +400,7 @@ def test_x_partial_and_counts_degradation_reported(stubs: Dict[str, MagicMock]) 
 def test_missing_x_key_continues(stubs: Dict[str, MagicMock]) -> None:
     """No X key behaves like X being unavailable."""
     result = _run(
-        json.dumps({"symbol": "PEPE", "address": ADDRESS}),
+        PEPE_PROMPT,
         keys={"openai": "sk", "serperapi": "s"},
     )
     assert result["error"] is None
@@ -411,7 +426,7 @@ def test_both_sources_failing(stubs: Dict[str, MagicMock]) -> None:
     """Both sources failing returns source_unavailable with degraded list."""
     stubs["x"].side_effect = requests.ConnectionError("down")
     stubs["news"].side_effect = requests.Timeout("slow")
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert result["error"]["type"] == "source_unavailable"
     assert result["degraded_sources"] == ["x", "news"]
 
@@ -442,7 +457,7 @@ def test_too_few_on_topic_gives_null_sentiment(
 ) -> None:
     """Fewer than MIN_ON_TOPIC_ITEMS valid on-topic items gives no score."""
     stubs["score"].return_value = labels
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert result["error"] is None
     assert result["sentiment"] is None
     assert result["breakdown"] is None
@@ -454,7 +469,7 @@ def test_min_on_topic_boundary_scores(stubs: Dict[str, MagicMock]) -> None:
     stubs["score"].return_value = _labels(
         bullish=["p1", "p2", "p3"], neutral=["p4"], bearish=["p5"]
     )
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert result["breakdown"] == {"bullish": 3, "neutral": 1, "bearish": 1}
     assert result["sentiment"] == 0.4
 
@@ -463,16 +478,19 @@ def test_large_sample_has_no_small_sample_note(stubs: Dict[str, MagicMock]) -> N
     """Ten or more on-topic items are not flagged as a small sample."""
     stubs["x"].return_value = (_posts(12), 50, [])
     stubs["score"].return_value = _labels(bullish=[f"p{i}" for i in range(1, 11)])
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert "Based on only" not in result["reasoning"]
 
 
 def test_tally_drops_unknown_and_conflicting_ids() -> None:
     """Unknown ids are ignored and an id in two classes is dropped."""
     labels = _labels(
-        bullish=["p1", "p2", "p2", "zz"], neutral=["p2", "n1"], bearish=["n3"]
+        bullish=["p1", "p2", "p2", "zz"],
+        neutral=["p2", "n1"],
+        bearish=["n3", "p3"],
+        off_topic=["p3", "p4"],
     )
-    assert tool.tally(labels, n_posts=2, n_headlines=1) == {
+    assert tool.tally(labels, n_posts=4, n_headlines=1) == {
         "p1": "bullish",
         "n1": "neutral",
     }
@@ -481,14 +499,14 @@ def test_tally_drops_unknown_and_conflicting_ids() -> None:
 def test_llm_error(stubs: Dict[str, MagicMock]) -> None:
     """An OpenAI failure returns llm_error."""
     stubs["score"].side_effect = tool.openai.OpenAIError("boom")
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert result["error"]["type"] == "llm_error"
 
 
 def test_unexpected_exception_is_internal(stubs: Dict[str, MagicMock]) -> None:
     """Any other exception returns internal instead of raising."""
     stubs["score"].side_effect = KeyError("x")
-    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    result = _run(PEPE_PROMPT)
     assert result["error"]["type"] == "internal"
 
 
@@ -507,7 +525,7 @@ def test_unknown_tool_raises() -> None:
 def test_openai_client_has_timeout(stubs: Dict[str, MagicMock]) -> None:
     """The OpenAI client is built with a bounded timeout and retries."""
     with patch.object(tool, "OpenAI") as client_cls:
-        _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+        _run(PEPE_PROMPT)
     assert client_cls.call_args.kwargs == {
         "api_key": "sk",
         "timeout": tool.LLM_TIMEOUT,
@@ -737,8 +755,11 @@ def _pair(
 def test_resolve_token(monkeypatch: Any) -> None:
     """Symbol, chain of the busiest pair and summed volume of own pairs."""
     pairs = [
-        _pair("$fun", ADDRESS.upper().replace("0X", "0x"), 10, chain="base"),
-        _pair("FUN", ADDRESS, 90, chain="robinhood"),
+        {
+            **_pair("$fun", ADDRESS.upper().replace("0X", "0x"), 10, chain="base"),
+            "fdv": 5e6,
+        },
+        {**_pair("FUN", ADDRESS, 90, chain="robinhood"), "fdv": "4000000"},
         _pair("OTHER", "0xother", 10**6),
     ]
     monkeypatch.setattr(
@@ -748,6 +769,7 @@ def test_resolve_token(monkeypatch: Any) -> None:
         "symbol": "FUN",
         "chain": "robinhood",
         "volume": 100.0,
+        "fdv": 5e6,
     }
 
 
@@ -757,12 +779,12 @@ def test_resolve_token(monkeypatch: Any) -> None:
         ([], {}),
         (
             [_pair("WIF HAT", ADDRESS, 5)],
-            {"symbol": None, "chain": "robinhood", "volume": 5.0},
+            {"symbol": None, "chain": "robinhood", "volume": 5.0, "fdv": 0.0},
         ),
         ("oops", None),
         (
             [None, _pair("A", ADDRESS, "n/a")],
-            {"symbol": "A", "chain": "robinhood", "volume": 0.0},
+            {"symbol": "A", "chain": "robinhood", "volume": 0.0, "fdv": 0.0},
         ),
     ],
 )
@@ -829,6 +851,11 @@ def test_is_ambiguous_ticker(volumes: Any, expected: bool) -> None:
         ("PEPE AIRDROP live", True),
         ("thoughts on pepe? https://t.co/abc", False),
         ("bought more $PEPE, tx 0x" + "ab" * 32, False),
+        ("spotted $PEPE in the listing feed, cast your vote", True),
+        ("@GoPlusSecurity I nominate $PEPE #DeepScanAudit", True),
+        ("$PEPE Telegram is live", True),
+        ("Don't miss $PEPE", True),
+        ("devoted $PEPE holder since launch", False),
     ],
 )
 def test_is_promo(text: str, expected: bool) -> None:
@@ -849,7 +876,7 @@ def test_promo_posts_dropped_before_scoring(stubs: Dict[str, MagicMock]) -> None
     posts = _posts(3)
     posts[1]["text"] = "join https://t.me/x"
     stubs["x"].return_value = (posts, 3, [])
-    _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    _run(PEPE_PROMPT)
     sent = stubs["score"].call_args.args[3]
     assert [p["id"] for p in sent] == ["100", "102"]
 
@@ -911,7 +938,8 @@ def test_fetch_headlines_time_filter(monkeypatch: Any, window: int, tbs: str) ->
     "text,expected",
     [
         ("robinhood:" + ADDRESS, False),
-        ("@user Gm robinhood:" + ADDRESS, False),
+        ("@user Gm robinhood:" + ADDRESS, True),
+        ("Bullish $PONS", True),
         ("@user $PONS #HTX", False),
         (ADDRESS + " " + SOL_ADDRESS, False),
         ("excited for $PONS", True),
@@ -930,7 +958,7 @@ def test_wordless_posts_dropped_before_scoring(stubs: Dict[str, MagicMock]) -> N
     posts = _posts(3)
     posts[1]["text"] = f"@user robinhood:{ADDRESS}"
     stubs["x"].return_value = (posts, 3, [])
-    _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    _run(PEPE_PROMPT)
     assert [p["id"] for p in stubs["score"].call_args.args[3]] == ["100", "102"]
 
 
@@ -949,3 +977,55 @@ def test_news_query(
 ) -> None:
     """The ticker is quoted and the scope matches the X query."""
     assert tool.news_query(symbol, address, chain, narrow) == expected
+
+
+def test_established_shared_ticker_is_not_narrowed(stubs: Dict[str, MagicMock]) -> None:
+    """A low DEX share but a large valuation keeps the broad query, with notes."""
+    stubs["resolve"].return_value = {
+        "symbol": "MAGIC",
+        "chain": "arbitrum",
+        "volume": 2_786.0,
+        "fdv": 12_900_000.0,
+    }
+    stubs["volumes"].return_value = {"0xother": 377_990.0}
+    result = _run(json.dumps({"symbol": "MAGIC", "address": ADDRESS}))
+    assert stubs["x"].call_args.args[1].startswith("($MAGIC OR")
+    assert "shared with tokens that have more DEX volume" in result["reasoning"]
+    notes = stubs["score"].call_args.args[2]["notes"]
+    assert any("shared with other, larger tokens" in n for n in notes)
+
+
+def test_x_partial_and_counts_notes(stubs: Dict[str, MagicMock]) -> None:
+    """Partial X failures and missing counts are also explained in reasoning."""
+    stubs["x"].return_value = (_posts(8), None, ["x_partial", "x_counts"])
+    result = _run(PEPE_PROMPT)
+    assert "Some X time slices failed" in result["reasoning"]
+    assert "X post count unavailable." in result["reasoning"]
+
+
+def test_missing_serper_key_continues(stubs: Dict[str, MagicMock]) -> None:
+    """No Serper key behaves like news being unavailable."""
+    result = _run(PEPE_PROMPT, keys={"openai": "sk", "x_bearer": "x"})
+    assert result["error"] is None
+    assert result["degraded_sources"] == ["news"]
+    stubs["news"].assert_not_called()
+
+
+def test_symbol_only_lookup_failure_is_degraded_and_ambiguous(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """A failed DexScreener search on a symbol-only request is flagged and noted."""
+    stubs["volumes"].return_value = None
+    result = _run(json.dumps({"symbol": "PEPE"}))
+    assert result["degraded_sources"] == ["dexscreener"]
+    assert result["reasoning"].startswith("No contract address given")
+
+
+def test_resolve_token_rejects_odd_chain_id(monkeypatch: Any) -> None:
+    """A DexScreener chainId that fails the chain check is not used."""
+    pairs = [_pair("FUN", ADDRESS, 5, chain="robin) OR (x")]
+    monkeypatch.setattr(
+        tool.requests, "get", MagicMock(return_value=_dex_response(pairs))
+    )
+    info = tool.resolve_token(ADDRESS)
+    assert info is not None and info["chain"] is None
