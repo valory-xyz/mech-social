@@ -39,3 +39,6 @@ mech_service/
 .darglint
 .gitleaks-merged.toml
 /.tomte-gitleaks-merged.toml
+
+# output of scripts/generate_metadata.py
+/metadata.json

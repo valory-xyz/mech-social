@@ -1,0 +1,58 @@
+# Input/output schemas published in metadata.json for each tool.
+# `defaults` maps a kind to its schemas; `tool_kinds` maps every wire name
+# (an entry of a tool's ALLOWED_TOOLS) to a kind. There is no fallback kind.
+# The fields themselves are documented in each tool's component.yaml
+# description, which metadata.json publishes next to these schemas.
+
+defaults:
+  social_sentiment:
+    input:
+      type: text
+      description: >-
+        One token per request: a JSON object {"symbol", "address", "chain",
+        "window_seconds"} with symbol or address required, or free text such
+        as "How is sentiment on $PEPE today?"
+    output:
+      type: object
+      description: A JSON object containing the social sentiment for the token
+      schema:
+        type: object
+        properties:
+          requestId:
+            type: integer
+            description: Unique identifier for the request
+          result:
+            type: string
+            description: Result in JSON format as a string, see the tool description
+            example: |-
+              {
+                "token": "ABC",
+                "address": "0x1111111111111111111111111111111111111111",
+                "chain": "base",
+                "window_seconds": 86400,
+                "sentiment": 0.5,
+                "mentions": 1250,
+                "posts_analyzed": 9,
+                "breakdown": {"bullish": 6, "neutral": 3, "bearish": 1},
+                "reasoning": "Most on-topic posts react positively to a new exchange listing.",
+                "top_posts": [
+                  "https://x.com/i/web/status/1000000000000000001",
+                  "https://x.com/i/web/status/1000000000000000002",
+                  "https://x.com/i/web/status/1000000000000000003",
+                  "https://x.com/i/web/status/1000000000000000004",
+                  "https://x.com/i/web/status/1000000000000000005"
+                ],
+                "headlines": [{"title": "ABC lists on a new exchange", "url": "https://example.com/abc"}],
+                "degraded_sources": [],
+                "error": null
+              }
+          prompt:
+            type: string
+            description: The prompt passed to the tool.
+        required:
+          - requestId
+          - result
+          - prompt
+
+tool_kinds:
+  token_social_sentiment: social_sentiment
