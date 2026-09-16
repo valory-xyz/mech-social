@@ -6,19 +6,21 @@ description: 'Measures social sentiment about one token. Input: a JSON prompt {"
   "address", "chain", "window_seconds"} (symbol or EVM address required; window default
   86400 s, 3600 to 604740) or free text such as "How is sentiment on $PEPE today?".
   Reads up to 40 X posts spread over the window plus up to 10 news headlines, keeps
-  only items about the token, and returns JSON: sentiment (-1 to 1) = (bullish - bearish)
-  / on-topic items, null below 5 on-topic items; breakdown = counts of on-topic sample
-  items per class (not all mentions); mentions = total X posts matching the search;
-  posts_analyzed = on-topic posts in the sample; top_posts; headlines; reasoning with
-  notes; degraded_sources = sources that failed while a result was still produced;
-  error = null or {type, message}.'
+  only items about the token (given the address of a Robinhood Chain tokenized stock
+  or ETF such as the NVDA token, posts and news about the stock itself count), and
+  returns JSON: sentiment (-1 to 1) = (bullish - bearish) / on-topic items, null below
+  5 on-topic items; breakdown = counts of on-topic sample items per class (not all
+  mentions); mentions = total X posts matching the search; posts_analyzed = on-topic
+  posts in the sample; top_posts; headlines; reasoning with notes; degraded_sources
+  = sources that failed while a result was still produced; error = null or {type,
+  message}.'
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeiegmjh5poyo6gdpp5gbikh5boskzqfoltzk2ulkqawleroopfunui
   tests/__init__.py: bafybeihqccfy6wls7e2jtgik5ddrmwpek5rztrielunr4tn2mtigvby6tu
-  tests/test_token_social_sentiment.py: bafybeicsyjziyolcbyo6f3z3ghn6qptwibpjssbre5ysxfmlr7v5jfmwqy
-  token_social_sentiment.py: bafybeiaj3djlavtz3lz3rk5qurpptolz5jnoihyfsyfwpye6clcalenpt4
+  tests/test_token_social_sentiment.py: bafybeic36mszl3xk6mfiwwoz66ufzq32mwxkydeszo7wzvywzkwg637me4
+  token_social_sentiment.py: bafybeiertlqnbxugmm2x4vgst2a3cfvdv6phtbukevvrgks4nigna5jmoa
 fingerprint_ignore_patterns: []
 entry_point: token_social_sentiment.py
 callable: run

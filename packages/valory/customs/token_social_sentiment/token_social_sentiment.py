@@ -25,7 +25,13 @@ Input (the request `prompt`, one of):
   - symbol: ticker, letters and digits, starts with a letter, at most 15
     characters, a leading `$` is ignored.
   - address: EVM contract address (0x + 40 hex). When DexScreener lists it,
-    its symbol and chain replace mismatching `symbol` / `chain` values.
+    its symbol and chain replace mismatching `symbol` / `chain` values. The
+    address of a Robinhood Chain tokenized stock or ETF (DexScreener name
+    "<Company> <bullet> Robinhood Token", e.g. the NVDA token) is measured by
+    the underlying stock: posts and news about the stock itself count. It
+    applies only when that token is the only one with this naming for the
+    ticker in the DexScreener search (at most 30 pairs), so a copy found next
+    to the real token blocks it.
   - chain: DexScreener chain id (e.g. robinhood, ethereum, base); taken from
     the address when not given.
   - window_seconds: integer, default 86400, clamped to 3600..604740.
@@ -47,8 +53,8 @@ Output (JSON string, always all keys):
   sample is at most 40 posts spread over the window).
 - headlines: news headlines in the sample that are about the token.
 - top_posts: links to the on-topic posts with the most engagement.
-- reasoning: short explanation, plus notes (ambiguous or shared ticker, small
-  sample, failed lookups or sources).
+- reasoning: short explanation, plus notes (ambiguous or shared ticker,
+  tokenized stock, small sample, failed lookups or sources).
 - degraded_sources: sources that failed while the request still produced a
   result: "x" (all X search slices), "x_partial" (some slices), "x_counts",
   "news", "dexscreener".
@@ -62,7 +68,7 @@ import json
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
 
 import openai
 import requests
@@ -125,9 +131,18 @@ MAX_TOP_POSTS = 5
 MIN_ON_TOPIC_ITEMS = 5
 # below this many on-topic items the score is noted as a small sample
 SMALL_SAMPLE_ITEMS = 10
-HTTP_TIMEOUT = 15
+# with every call timing out, a free-text request takes about 200 s (2 DexScreener
+# + 4 X slices + counts + Serper at HTTP_TIMEOUT, 2 LLM calls x 2 attempts at
+# LLM_TIMEOUT), under the mech's default TASK_DEADLINE of 240 s
+HTTP_TIMEOUT = 10
+# list prices in USD, reported to the mech as the cost of each request: X
+# pay-per-use (docs.x.com pricing) and Serper's Starter tier, checked
+# 2026-09-16. X bills a post once per UTC day, so repeated reads may cost less
+X_POST_READ_USD = 0.005
+X_COUNTS_REQUEST_USD = 0.005
+SERPER_QUERY_USD = 0.001
 # the OpenAI SDK defaults (600 s, 2 retries) can outlast the mech task deadline
-LLM_TIMEOUT = 45
+LLM_TIMEOUT = 30
 LLM_MAX_RETRIES = 1
 
 X_SEARCH_URL = "https://api.x.com/2/tweets/search/recent"
@@ -143,6 +158,11 @@ MIN_TICKER_SHARE = 0.25
 NARROW_MAX_FDV = 10_000_000
 # without an address, a ticker is ambiguous unless one DEX token has this share
 MIN_DOMINANT_SHARE = 0.9
+# Robinhood Chain lists tokenized stocks and ETFs as "<Company> <U+2022 bullet>
+# Robinhood Token", e.g. the NVDA token. The name is only matched, never put in
+# a prompt: anyone can deploy a token with any name
+STOCK_NAME_SUFFIX = "\u2022 Robinhood Token"
+STOCK_CHAIN = "robinhood"
 # DexScreener failures that should degrade the request, not fail it
 DEX_ERRORS = (requests.RequestException, ValueError, TypeError, AttributeError)
 
@@ -272,6 +292,22 @@ Time window: last {hours:g} hours
 </data>"""
 
 
+def _api_key(api_keys: Any, name: str) -> Optional[str]:
+    """Return the current key for a service.
+
+    :param api_keys: the mech KeyChain (or a dict) of key lists.
+    :param name: service name, e.g. "x_bearer".
+    :return: the key, or None when missing or when the service has no keys.
+    """
+    if api_keys is None:
+        return None
+    try:
+        return api_keys.get(name, None) or None
+    except (IndexError, KeyError, TypeError):
+        # a KeyChain service configured with an empty key list
+        return None
+
+
 def _empty_result(window_seconds: int) -> Dict[str, Any]:
     """Return an output dict with every key present and data fields null.
 
@@ -353,7 +389,7 @@ def validate_token(symbol: Any, address: Any) -> Tuple[Optional[str], Optional[s
     :return: cleaned (symbol, address).
     """
     if symbol is not None:
-        if not isinstance(symbol, str) or not SYMBOL_RE.match(symbol.lstrip("$")):
+        if not isinstance(symbol, str) or not SYMBOL_RE.fullmatch(symbol.lstrip("$")):
             raise ToolError("invalid_input", f"invalid symbol: {symbol!r}")
         symbol = symbol.lstrip("$").upper()
     if address is not None:
@@ -427,8 +463,9 @@ def resolve_token(address: str) -> Optional[Dict[str, Any]]:
     """Look up symbol, chain and 24h volume for a contract address.
 
     :param address: token contract address.
-    :return: {"symbol", "chain", "volume", "fdv"} ({} if not listed), or None
-        if the lookup failed.
+    :return: {"symbol", "chain", "volume", "fdv", "stock"} ({} if not
+        listed), or None if the lookup failed. "stock" is True when the token
+        uses the Robinhood Chain tokenized-stock naming.
     """
     pairs = _dex_get(DEXSCREENER_PAIRS_URL.format(address=address))
     if pairs is None:
@@ -442,38 +479,83 @@ def resolve_token(address: str) -> Optional[Dict[str, Any]]:
         return {}
     # listings may carry "$FUN" or odd characters; only a clean ticker is
     # safe to use in the X query
-    symbol = str((own[0].get("baseToken") or {}).get("symbol", "")).strip()
-    symbol = symbol.lstrip("$").upper()
+    base = own[0].get("baseToken") or {}
+    symbol = str(base.get("symbol", "")).strip().lstrip("$").upper()
     top = max(own, key=_pair_volume)
     chain = str(top.get("chainId") or "").strip().lower()
     return {
-        "symbol": symbol if SYMBOL_RE.match(symbol) else None,
+        "symbol": symbol if SYMBOL_RE.fullmatch(symbol) else None,
         # same check as a requested chain: it goes into the X query and prompt
         "chain": chain if CHAIN_RE.match(chain) else None,
         "volume": sum(_pair_volume(p) for p in own),
         "fdv": max((_pair_number(p, "fdv") for p in own), default=0.0),
+        "stock": _is_stock_pair(top),
     }
 
 
-def symbol_volumes(symbol: str) -> Optional[Dict[str, float]]:
-    """24h DEX volume per token address among tokens with this ticker.
+def _is_stock_pair(pair: Dict[str, Any]) -> bool:
+    """Tell whether a pair trades a token named like a Robinhood Chain stock.
+
+    :param pair: DexScreener pair.
+    :return: True for "<Company> <bullet> Robinhood Token" on Robinhood Chain.
+    """
+    name = str((pair.get("baseToken") or {}).get("name", "")).strip()
+    return (
+        str(pair.get("chainId", "")).strip().lower() == STOCK_CHAIN
+        and name.endswith(STOCK_NAME_SUFFIX)
+        and len(name) > len(STOCK_NAME_SUFFIX)
+    )
+
+
+def search_ticker(symbol: str) -> Optional[List[Dict[str, Any]]]:
+    """Search DexScreener for pairs of tokens with this ticker.
 
     DexScreener search returns at most 30 pairs, so this is an approximation.
 
     :param symbol: token ticker.
-    :return: {lowercase address: volume}, or None if the lookup failed.
+    :return: pairs whose base token has this ticker, or None if the lookup
+        failed.
     """
     pairs = _dex_get(DEXSCREENER_SEARCH_URL, params={"q": symbol})
     if pairs is None:
         return None
+    return [
+        pair
+        for pair in pairs
+        if str((pair.get("baseToken") or {}).get("symbol", "")).lstrip("$").upper()
+        == symbol
+    ]
+
+
+def _pair_address(pair: Dict[str, Any]) -> str:
+    """Lowercase base-token address of a pair.
+
+    :param pair: DexScreener pair.
+    :return: address.
+    """
+    return str((pair.get("baseToken") or {}).get("address", "")).lower()
+
+
+def symbol_volumes(pairs: List[Dict[str, Any]]) -> Dict[str, float]:
+    """24h DEX volume per token address.
+
+    :param pairs: search_ticker() result.
+    :return: {lowercase address: volume}.
+    """
     volumes: Dict[str, float] = {}
     for pair in pairs:
-        base = pair.get("baseToken") or {}
-        if str(base.get("symbol", "")).lstrip("$").upper() != symbol:
-            continue
-        key = str(base.get("address", "")).lower()
+        key = _pair_address(pair)
         volumes[key] = volumes.get(key, 0.0) + _pair_volume(pair)
     return volumes
+
+
+def stock_addresses(pairs: List[Dict[str, Any]]) -> Set[str]:
+    """Addresses of tokens named like a Robinhood Chain tokenized stock.
+
+    :param pairs: search_ticker() result.
+    :return: lowercase addresses.
+    """
+    return {_pair_address(pair) for pair in pairs if _is_stock_pair(pair)}
 
 
 def ticker_share(
@@ -544,7 +626,7 @@ def _dedupe_key(text: str) -> str:
 
 def fetch_x_posts(
     bearer: str, query: str, start_time: datetime, end_time: datetime
-) -> Tuple[List[Dict[str, Any]], Optional[int], List[str]]:
+) -> Tuple[List[Dict[str, Any]], Optional[int], List[str], float]:
     """Fetch X posts spread over the window, and the total post count.
 
     A failed slice is skipped; the search only raises if every slice fails.
@@ -554,13 +636,16 @@ def fetch_x_posts(
     :param start_time: window start.
     :param end_time: window end.
     :return: (posts as {id, text, engagement}, total mentions or None,
-        degraded sources among "x_partial" and "x_counts").
+        degraded sources among "x_partial" and "x_counts", cost in USD of the
+        posts read and the counts request).
     """
     headers = {"Authorization": f"Bearer {bearer}"}
     fmt = "%Y-%m-%dT%H:%M:%SZ"
     step = (end_time - start_time) / X_SLICES
     seen = set()
     posts: List[Dict[str, Any]] = []
+    # every post X returns is billed, duplicates and dropped posts included
+    cost = 0.0
     failed_slices = 0
     last_error: Optional[Exception] = None
     for i in range(X_SLICES):
@@ -587,6 +672,7 @@ def fetch_x_posts(
             failed_slices += 1
             last_error = e
             continue
+        cost += X_POST_READ_USD * len(data)
         for post in data:
             text = " ".join(str(post.get("text", "")).split())
             key = _dedupe_key(text)
@@ -628,13 +714,14 @@ def fetch_x_posts(
             timeout=HTTP_TIMEOUT,
         )
         counts.raise_for_status()
+        cost += X_COUNTS_REQUEST_USD
         meta = counts.json().get("meta") or {}
         mentions = meta.get("total_tweet_count", meta.get("total_post_count"))
     except (requests.RequestException, ValueError, AttributeError) as e:
         print(f"[token_social_sentiment] X counts unavailable: {e}")
     if mentions is None:
         degraded.append("x_counts")
-    return posts, mentions, degraded
+    return posts, mentions, degraded, cost
 
 
 def is_promo(text: str, address: Optional[str]) -> bool:
@@ -728,7 +815,11 @@ def clean_post_text(text: str, address: Optional[str]) -> str:
 
 
 def news_query(
-    symbol: Optional[str], address: Optional[str], chain: Optional[str], narrow: bool
+    symbol: Optional[str],
+    address: Optional[str],
+    chain: Optional[str],
+    narrow: bool,
+    stock: bool = False,
 ) -> str:
     """Build the Serper news query (quoted ticker), scoped like the X query.
 
@@ -736,8 +827,11 @@ def news_query(
     :param address: token contract address.
     :param chain: chain name.
     :param narrow: the ticker is shared with larger tokens.
+    :param stock: the token is a tokenized stock.
     :return: query string.
     """
+    if symbol and stock:
+        return f'"{symbol}" stock'
     if symbol and not narrow:
         return f'"{symbol}" token'
     if symbol and chain:
@@ -821,6 +915,33 @@ def _count_tokens(
     )
 
 
+def _count_source_cost(
+    counter_callback: Optional[Callable[..., Any]], model: str, cost: float
+) -> None:
+    """Report the X and Serper cost to the mech's counter callback.
+
+    The mech adds `call_cost` above the call's token cost to its extra cost;
+    this call carries no tokens.
+
+    :param counter_callback: mech token counter.
+    :param model: model name the callback requires.
+    :param cost: cost in USD.
+    """
+    if counter_callback is None or cost <= 0:
+        return
+    try:
+        counter_callback(
+            input_tokens=0,
+            output_tokens=0,
+            model=model,
+            token_counter=lambda text, model: len(text) // 4,
+            call_cost=cost,
+        )
+    except Exception as e:  # pylint: disable=broad-except
+        # cost reporting must not fail a request whose data is already paid for
+        print(f"[token_social_sentiment] cost reporting failed: {e}")
+
+
 def extract_token(
     client: OpenAI,
     model: str,
@@ -882,6 +1003,9 @@ def score_sentiment(
     )
     # drop lone surrogates some posts carry; they are not valid UTF-8
     data = data.encode("utf-8", "replace").decode("utf-8")
+    # post text is unescaped HTML: keep a "</data>" in a post from closing the
+    # data block
+    data = data.replace("<", "\\u003c").replace(">", "\\u003e")
     response = client.beta.chat.completions.parse(
         model=model,
         temperature=0,
@@ -954,7 +1078,7 @@ def _resolve_target(
     :param model: model name.
     :param counter_callback: mech token counter.
     :param run_state: shared "notes", "llm_notes" and "degraded" lists.
-    :return: target dict with symbol, address, chain, narrow.
+    :return: target dict with symbol, address, chain, narrow, stock.
     """
     notes, llm_notes, degraded = (
         run_state["notes"],
@@ -979,6 +1103,7 @@ def _resolve_target(
     narrow = False
     own_volume = own_fdv = 0.0
     token_lookup_failed = False
+    stock = False
     if address:
         info = resolve_token(address)
         if info is None:
@@ -1002,14 +1127,35 @@ def _resolve_target(
                 )
             chain = info["chain"] or chain
             own_volume, own_fdv = info["volume"], info["fdv"]
+            stock = bool(info.get("stock"))
 
-    volumes: Optional[Dict[str, float]] = None
+    pairs: Optional[List[Dict[str, Any]]] = None
     if symbol and not token_lookup_failed:
-        volumes = symbol_volumes(symbol)
-        if volumes is None:
+        pairs = search_ticker(symbol)
+        if pairs is None:
             degraded.append("dexscreener")
+    volumes = None if pairs is None else symbol_volumes(pairs)
 
-    if symbol and address and not token_lookup_failed:
+    if stock:
+        # anyone can deploy a token with this naming: the stock handling needs
+        # this token to be the only one with it in the search, so a copy found
+        # next to the real token blocks it (a copy is only missed if the real
+        # token is not among the 30 pairs the search returns)
+        stock = pairs is not None and stock_addresses(pairs) == {str(address).lower()}
+        if pairs is None and symbol:
+            notes.append("Tokenized-stock check failed; handled as a normal token.")
+    if stock:
+        # owner decision: a tokenized stock is measured by its underlying stock,
+        # so the search is not narrowed to the chain. No LLM note: without one
+        # the model already counts stock posts and drops same-ticker memecoins,
+        # and a note telling it that $TICKER posts count made it keep promo
+        # posts that only tag the ticker (AAPL: 6 of 34 items)
+        notes.append(
+            f"Tokenized stock ${symbol}: posts and news about the stock itself "
+            f"are counted."
+        )
+
+    if symbol and address and not token_lookup_failed and not stock:
         share = None if volumes is None else ticker_share(volumes, address, own_volume)
         if share is None:
             notes.append(
@@ -1045,7 +1191,13 @@ def _resolve_target(
             "use the user question to decide which asset is meant; items about "
             "other assets are off_topic."
         )
-    return {"symbol": symbol, "address": address, "chain": chain, "narrow": narrow}
+    return {
+        "symbol": symbol,
+        "address": address,
+        "chain": chain,
+        "narrow": narrow,
+        "stock": stock,
+    }
 
 
 def _fetch_items(
@@ -1059,7 +1211,7 @@ def _fetch_items(
     :param target: _resolve_target() result.
     :param api_keys: KeyChain or dict with `serperapi` and `x_bearer`.
     :param window_seconds: time window.
-    :param run_state: shared "notes" and "degraded" lists.
+    :param run_state: shared "notes" and "degraded" lists, and "cost" in USD.
     :return: (posts, headlines, mentions).
     """
     notes, degraded = run_state["notes"], run_state["degraded"]
@@ -1075,28 +1227,32 @@ def _fetch_items(
     headlines: List[Dict[str, str]] = []
     mentions = None
 
-    x_bearer = api_keys.get("x_bearer", None)
+    x_bearer = _api_key(api_keys, "x_bearer")
     if x_bearer:
         try:
-            posts, mentions, x_degraded = fetch_x_posts(
+            posts, mentions, x_degraded, x_cost = fetch_x_posts(
                 x_bearer,
                 build_x_query(symbol, address, chain, narrow=narrow),
                 start_time,
                 end_time,
             )
             degraded.extend(x_degraded)
+            run_state["cost"] += x_cost
         except requests.RequestException as e:
             print(f"[token_social_sentiment] X search failed: {e}")
             degraded.append("x")
     else:
         degraded.append("x")
 
-    serper_key = api_keys.get("serperapi", None)
+    serper_key = _api_key(api_keys, "serperapi")
     if serper_key:
         try:
             headlines = fetch_headlines(
-                serper_key, news_query(symbol, address, chain, narrow), window_seconds
+                serper_key,
+                news_query(symbol, address, chain, narrow, target["stock"]),
+                window_seconds,
             )
+            run_state["cost"] += SERPER_QUERY_USD
         except (requests.RequestException, ValueError, AttributeError) as e:
             print(f"[token_social_sentiment] Serper news failed: {e}")
             degraded.append("news")
@@ -1138,14 +1294,22 @@ def analyze(
     parsed = parse_prompt(prompt)
     result["window_seconds"] = clamp_window(parsed["window_seconds"])
 
-    openai_key = api_keys.get("openai", None) if api_keys is not None else None
+    openai_key = _api_key(api_keys, "openai")
     if not openai_key:
         raise ToolError("internal", "missing openai API key")
+    if not _api_key(api_keys, "x_bearer") and not _api_key(api_keys, "serperapi"):
+        # checked before any paid call
+        raise ToolError("source_unavailable", "no X or news API key")
     client = OpenAI(
         api_key=openai_key, timeout=LLM_TIMEOUT, max_retries=LLM_MAX_RETRIES
     )
 
-    run_state: Dict[str, Any] = {"notes": [], "llm_notes": [], "degraded": []}
+    run_state: Dict[str, Any] = {
+        "notes": [],
+        "llm_notes": [],
+        "degraded": [],
+        "cost": 0.0,
+    }
     result["degraded_sources"] = run_state["degraded"]
     target = _resolve_target(parsed, client, model, counter_callback, run_state)
     result["token"] = target["symbol"]
@@ -1155,6 +1319,7 @@ def analyze(
     posts, headlines, result["mentions"] = _fetch_items(
         target, api_keys, result["window_seconds"], run_state
     )
+    _count_source_cost(counter_callback, model, run_state["cost"])
     notes = run_state["notes"]
     result["posts_analyzed"] = 0
     result["headlines"] = []

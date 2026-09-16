@@ -88,6 +88,8 @@ dependencies:
     version: ==6.21.6
   open-aea-ledger-ethereum:
     version: ==2.2.9
+  openai:
+    version: ==1.93.0
   requests:
     version: ==2.32.5
 default_connection: null
