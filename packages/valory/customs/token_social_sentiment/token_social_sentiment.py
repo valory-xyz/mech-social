@@ -77,6 +77,11 @@ X_END_TIME_MARGIN_SECONDS = 30
 MAX_CASHTAGS_PER_POST = 4
 # promotion markers; a post with any of them is dropped before the LLM
 PROMO_MARKERS = ("t.me/", "whatsapp", "airdrop", "giveaway", "dm me")
+# posts with fewer real words than this (after removing handles, tags and
+# addresses) carry no opinion, e.g. "robinhood:0x39db..." or "@user $PONS"
+MIN_POST_WORDS = 2
+# a run of CJK characters counts as one word, so count characters instead
+MIN_POST_CJK_CHARS = 4
 MAX_POST_CHARS = 280
 MAX_HEADLINES = 10
 MAX_TOP_POSTS = 5
@@ -122,6 +127,13 @@ URL_RE = re.compile(r"https?://\S+")
 # Solana-style base58 contract addresses (EVM ones use ADDRESS_RE)
 BASE58_ADDRESS_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
 LEADING_HANDLES_RE = re.compile(r"^(?:@\w+\s+)+")
+# X renders Smart Cashtags as chain:address, e.g. "robinhood:0x39db..."
+SMART_TAG_RE = re.compile(
+    r"\b[a-z][a-z0-9-]*:(?:0x[0-9a-fA-F]{40}|native|[1-9A-HJ-NP-Za-km-z]{32,44})"
+)
+TAGS_RE = re.compile(r"[@$#]\w+")
+WORD_RE = re.compile(r"[^\W\d_]{2,}")
+CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
 CASHTAG_RE = re.compile(r"\$([A-Za-z][A-Za-z0-9]{0,14})\b")
 SYMBOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,14}$")
 CHAIN_RE = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,29}$")
@@ -582,6 +594,23 @@ def is_promo(text: str, address: Optional[str]) -> bool:
     return any(marker in lowered for marker in PROMO_MARKERS)
 
 
+def has_words(text: str) -> bool:
+    """Tell whether a post says anything beyond handles, tags and addresses.
+
+    :param text: post text.
+    :return: True if the post has at least MIN_POST_WORDS words (or
+        MIN_POST_CJK_CHARS CJK characters) left.
+    """
+    rest = URL_RE.sub(" ", text)
+    rest = SMART_TAG_RE.sub(" ", rest)
+    rest = ADDRESS_RE.sub(" ", BASE58_ADDRESS_RE.sub(" ", rest))
+    rest = TAGS_RE.sub(" ", rest)
+    return (
+        len(WORD_RE.findall(rest)) >= MIN_POST_WORDS
+        or len(CJK_RE.findall(rest)) >= MIN_POST_CJK_CHARS
+    )
+
+
 def clean_post_text(text: str, address: Optional[str]) -> str:
     """Remove text that costs tokens but carries no stance.
 
@@ -595,14 +624,34 @@ def clean_post_text(text: str, address: Optional[str]) -> str:
     return " ".join(text.split())
 
 
+def news_query(
+    symbol: Optional[str], address: Optional[str], chain: Optional[str], narrow: bool
+) -> str:
+    """Build the Serper news query, with the same scope as the X query.
+
+    The ticker is quoted so Google does not match loose words (for "ARGUS
+    token" it returned articles about AI tokens).
+
+    :param symbol: token ticker.
+    :param address: token contract address.
+    :param chain: chain name.
+    :param narrow: the ticker is shared with larger tokens.
+    :return: query string.
+    """
+    if symbol and not narrow:
+        return f'"{symbol}" token'
+    if symbol and chain:
+        return f'"{symbol}" {chain} token'
+    return f'"{address}"' if address else f'"{symbol}" token'
+
+
 def fetch_headlines(
-    serper_key: str, symbol: Optional[str], address: Optional[str], window_seconds: int
+    serper_key: str, query: str, window_seconds: int
 ) -> List[Dict[str, str]]:
     """Fetch news headlines from Serper.
 
     :param serper_key: Serper API key.
-    :param symbol: token ticker (or ticker plus chain for a shared ticker).
-    :param address: token contract address, used when there is no symbol.
+    :param query: news_query() result.
     :param window_seconds: time window.
     :return: headlines as {title, url, snippet}, unique titles.
     """
@@ -613,7 +662,6 @@ def fetch_headlines(
         tbs = "qdr:d"
     else:
         tbs = "qdr:w"
-    query = f"{symbol} token" if symbol else str(address)
     response = requests.post(
         SERPER_NEWS_URL,
         headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
@@ -935,14 +983,9 @@ def _fetch_items(
 
     serper_key = api_keys.get("serperapi", None)
     if serper_key:
-        if narrow:
-            # same scope as the X query: ticker plus chain, else the address
-            news_symbol = f"{symbol} {chain}" if chain else None
-        else:
-            news_symbol = symbol
         try:
             headlines = fetch_headlines(
-                serper_key, news_symbol, address, window_seconds
+                serper_key, news_query(symbol, address, chain, narrow), window_seconds
             )
         except (requests.RequestException, ValueError, AttributeError) as e:
             print(f"[token_social_sentiment] Serper news failed: {e}")
@@ -956,7 +999,9 @@ def _fetch_items(
         notes.append("X unavailable.")
     if "news" in degraded:
         notes.append("news unavailable.")
-    posts = [p for p in posts if not is_promo(p["text"], address)]
+    posts = [
+        p for p in posts if not is_promo(p["text"], address) and has_words(p["text"])
+    ]
     return posts, headlines, mentions
 
 

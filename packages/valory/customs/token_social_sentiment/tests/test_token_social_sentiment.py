@@ -39,7 +39,8 @@ KEYS = {"openai": "sk", "serperapi": "serper", "x_bearer": "x"}
 def _posts(n: int) -> List[Dict[str, Any]]:
     """Build n posts; higher index = more engagement."""
     return [
-        {"id": str(100 + i), "text": f"post {i}", "engagement": i} for i in range(n)
+        {"id": str(100 + i), "text": f"post number {i}", "engagement": i}
+        for i in range(n)
     ]
 
 
@@ -299,7 +300,7 @@ def test_shared_ticker_narrows_search(
     _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
     query = stubs["x"].call_args.args[1]
     assert query.startswith('(($FUN "robinhood")') is narrow
-    assert (stubs["news"].call_args.args[1] == "FUN robinhood") is narrow
+    assert (stubs["news"].call_args.args[1] == '"FUN" robinhood token') is narrow
     notes = stubs["score"].call_args.args[2]["notes"]
     assert any("shared with other, larger tokens" in n for n in notes) is narrow
 
@@ -324,7 +325,7 @@ def test_shared_ticker_without_chain_uses_address(stubs: Dict[str, MagicMock]) -
     stubs["volumes"].return_value = {"0xother": 500.0}
     result = _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
     assert stubs["x"].call_args.args[1] == f'("{ADDRESS}") -is:retweet'
-    assert stubs["news"].call_args.args[1] is None
+    assert stubs["news"].call_args.args[1] == f'"{ADDRESS}"'
     assert "searched by contract address only" in result["reasoning"]
 
 
@@ -884,10 +885,10 @@ def test_fetch_headlines_drops_press_releases_and_duplicates(monkeypatch: Any) -
     }
     post = MagicMock(return_value=response)
     monkeypatch.setattr(tool.requests, "post", post)
-    headlines = tool.fetch_headlines("k", "PEPE", None, 86400)
+    headlines = tool.fetch_headlines("k", '"PEPE" token', 86400)
     assert [h["title"] for h in headlines] == ["Real News"]
     assert post.call_args.kwargs["json"] == {
-        "q": "PEPE token",
+        "q": '"PEPE" token',
         "tbs": "qdr:d",
         "num": 10,
     }
@@ -902,6 +903,49 @@ def test_fetch_headlines_time_filter(monkeypatch: Any, window: int, tbs: str) ->
     response.json.return_value = {"news": []}
     post = MagicMock(return_value=response)
     monkeypatch.setattr(tool.requests, "post", post)
-    tool.fetch_headlines("k", None, ADDRESS, window)
+    tool.fetch_headlines("k", "q", window)
     assert post.call_args.kwargs["json"]["tbs"] == tbs
-    assert post.call_args.kwargs["json"]["q"] == ADDRESS
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("robinhood:" + ADDRESS, False),
+        ("@user Gm robinhood:" + ADDRESS, False),
+        ("@user $PONS #HTX", False),
+        (ADDRESS + " " + SOL_ADDRESS, False),
+        ("excited for $PONS", True),
+        ("Great launch robinhood:" + ADDRESS + " another pump and dump", True),
+        ("".join(chr(c) for c in (0x6211, 0x5F88, 0x770B, 0x597D)) + " $PONS", True),
+        ("https://t.co/abc $PONS", False),
+    ],
+)
+def test_has_words(text: str, expected: bool) -> None:
+    """Posts made only of handles, tags, links and addresses have no words."""
+    assert tool.has_words(text) is expected
+
+
+def test_wordless_posts_dropped_before_scoring(stubs: Dict[str, MagicMock]) -> None:
+    """Posts without words never reach the LLM."""
+    posts = _posts(3)
+    posts[1]["text"] = f"@user robinhood:{ADDRESS}"
+    stubs["x"].return_value = (posts, 3, [])
+    _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    assert [p["id"] for p in stubs["score"].call_args.args[3]] == ["100", "102"]
+
+
+@pytest.mark.parametrize(
+    "symbol,address,chain,narrow,expected",
+    [
+        ("ARGUS", ADDRESS, "arc", False, '"ARGUS" token'),
+        ("PEPE", None, None, False, '"PEPE" token'),
+        ("FUN", ADDRESS, "robinhood", True, '"FUN" robinhood token'),
+        ("FUN", ADDRESS, None, True, f'"{ADDRESS}"'),
+        (None, ADDRESS, None, False, f'"{ADDRESS}"'),
+    ],
+)
+def test_news_query(
+    symbol: Any, address: Any, chain: Any, narrow: bool, expected: str
+) -> None:
+    """The ticker is quoted and the scope matches the X query."""
+    assert tool.news_query(symbol, address, chain, narrow) == expected
