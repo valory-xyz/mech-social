@@ -1148,6 +1148,18 @@ def _stock_pair(
         ("NVIDIA \u2022 Robinhood Token fake", "robinhood", False),
         (" NVIDIA \u2022 Robinhood Token ", "Robinhood", True),
     ],
+    # short ids: pytest puts the test id in an environment variable, which
+    # Windows caps at 32767 characters
+    ids=[
+        "stock-name",
+        "other-chain",
+        "no-bullet",
+        "no-company",
+        "meme-name",
+        "very-long-name",
+        "suffix-not-at-end",
+        "padded-name",
+    ],
 )
 def test_resolve_token_detects_stock_naming(
     monkeypatch: Any, name: str, chain: str, expected: bool
