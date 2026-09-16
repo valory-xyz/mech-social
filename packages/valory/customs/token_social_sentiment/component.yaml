@@ -1,0 +1,32 @@
+name: token_social_sentiment
+author: valory
+version: 0.1.0
+type: custom
+description: 'Measures social sentiment about one token. Reads a sample of up to 40
+  X posts spread over the time window (default 24h) plus up to 10 news headlines for
+  the token ticker or contract address, keeps only items about the token, and returns:
+  breakdown = number of those on-topic sample items (posts plus headlines) that are
+  bullish, neutral and bearish (sample counts, not all mentions); sentiment (-1 to
+  1) = (bullish - bearish) / on-topic items; mentions = total X posts matching the
+  search in the window; posts_analyzed = on-topic posts in the sample; top posts,
+  headlines and a short reasoning. Sentiment is null when fewer than 5 on-topic items
+  are found.'
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeiegmjh5poyo6gdpp5gbikh5boskzqfoltzk2ulkqawleroopfunui
+  tests/__init__.py: bafybeihqccfy6wls7e2jtgik5ddrmwpek5rztrielunr4tn2mtigvby6tu
+  tests/test_token_social_sentiment.py: bafybeib2feig42io2z3h2fs2mk7p53f5e4mv23yivr23sfng54wvduyp3u
+  token_social_sentiment.py: bafybeiepuwmwgc2qbrop76lkhsm4qu7nh4ubw37g2xvikktptf7wu4gts4
+fingerprint_ignore_patterns: []
+entry_point: token_social_sentiment.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'
+  requests:
+    version: ==2.32.5

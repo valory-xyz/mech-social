@@ -1,5 +1,6 @@
 {
     "dev": {
+        "custom/valory/token_social_sentiment/0.1.0": "bafybeig6f6ijyn2koesnpyhbuuh636pgou4mhlflcgdmvv4u2qzroqfjtu",
         "agent/valory/mech_social/0.1.0": "bafybeiftt5qfhrpfm64uljk7mmcmumkbjjrrfmulleyebzzpd5x4oezace",
         "service/valory/mech_social/0.1.0": "bafybeidzeczip2gp2skvrzwow5nsnwplxan4mfxxpe5eidf7uoc6andgja"
     },

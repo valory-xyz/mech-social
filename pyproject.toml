@@ -39,6 +39,7 @@ dependencies = [
     # Transitive via open-aea-ledger-solana. Unpinned, tox envs resolve the
     # httpx 1.0 dev prerelease, which ships no license metadata.
     "httpx==0.28.1",
+    "openai==1.93.0",
 ]
 
 [project.urls]
@@ -64,10 +65,10 @@ packages_paths = "packages/valory"
 # tests/ is first-party Python at the repo root. Listing it also gives the
 # linters a target while the repo has no dev customs yet.
 service_specific_packages_extra = ["tests"]
-# The only first-party tests live under tests/; without pinning,
-# auto-discovery picks up upstream packages/valory/skills/.../tests/
+# First-party tests live under tests/ and in each dev custom; without
+# pinning, auto-discovery picks up upstream packages/valory/skills/.../tests/
 # whose tendermint-binary deps don't apply downstream.
-pytest_targets = ["tests"]
+pytest_targets = ["tests", "packages/valory/customs"]
 # Third-party skills/contracts on disk are synced from mech upstream;
 # tomte auto-prepends valory-xyz/open-autonomy@... and open-aea@...
 # from pyproject pins, so only the non-PyPI upstreams need listing.
