@@ -57,8 +57,10 @@ Output (JSON string, always all keys):
 """
 
 import html
+import itertools
 import json
 import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
@@ -105,6 +107,17 @@ PROMO_RE = re.compile(
 MIN_POST_WORDS = 1
 # a run of CJK characters counts as one word, so count characters instead
 MIN_POST_CJK_CHARS = 4
+# template shill waves: posts from different accounts that reuse most of the
+# same words with small changes, which exact-copy dedupe misses. Posts whose
+# word sets overlap by at least WAVE_MIN_JACCARD are linked; a linked group of
+# WAVE_MIN_POSTS or more is dropped. On 13 evaluated requests this dropped 20
+# posts (signal-group copies, bot templates, "CA:" reply drops), all labelled
+# off-topic by a separate blind labelling pass
+WAVE_MIN_JACCARD = 0.6
+WAVE_MIN_POSTS = 3
+# shorter posts ("$PEPE going to the moon") share their few words by chance,
+# so they are never linked
+WAVE_MIN_WORDS = 5
 MAX_POST_CHARS = 280
 MAX_HEADLINES = 10
 MAX_TOP_POSTS = 5
@@ -644,6 +657,18 @@ def is_promo(text: str, address: Optional[str]) -> bool:
     return bool(PROMO_RE.search(text))
 
 
+def _strip_post(text: str) -> str:
+    """Remove links, smart tags, addresses, handles and tags from a post.
+
+    :param text: post text.
+    :return: the remaining text.
+    """
+    rest = URL_RE.sub(" ", text)
+    rest = SMART_TAG_RE.sub(" ", rest)
+    rest = ADDRESS_RE.sub(" ", BASE58_ADDRESS_RE.sub(" ", rest))
+    return TAGS_RE.sub(" ", rest)
+
+
 def has_words(text: str) -> bool:
     """Tell whether a post says anything beyond handles, tags and addresses.
 
@@ -651,14 +676,42 @@ def has_words(text: str) -> bool:
     :return: True if the post has at least MIN_POST_WORDS words (or
         MIN_POST_CJK_CHARS CJK characters) left.
     """
-    rest = URL_RE.sub(" ", text)
-    rest = SMART_TAG_RE.sub(" ", rest)
-    rest = ADDRESS_RE.sub(" ", BASE58_ADDRESS_RE.sub(" ", rest))
-    rest = TAGS_RE.sub(" ", rest)
+    rest = _strip_post(text)
     return (
         len(WORD_RE.findall(rest)) >= MIN_POST_WORDS
         or len(CJK_RE.findall(rest)) >= MIN_POST_CJK_CHARS
     )
+
+
+def drop_waves(posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop template shill waves: groups of near-copy posts.
+
+    :param posts: posts as {id, text, engagement}.
+    :return: the posts that are not part of a wave, in the same order.
+    """
+    words = [
+        {w.lower() for w in WORD_RE.findall(_strip_post(p["text"]))} for p in posts
+    ]
+    group = list(range(len(posts)))
+
+    def root(i: int) -> int:
+        """Return the group a post belongs to.
+
+        :param i: post index.
+        :return: index of the post that represents the group.
+        """
+        while group[i] != i:
+            i = group[i]
+        return i
+
+    for i, j in itertools.combinations(range(len(posts)), 2):
+        a, b = words[i], words[j]
+        if min(len(a), len(b)) >= WAVE_MIN_WORDS and len(
+            a & b
+        ) >= WAVE_MIN_JACCARD * len(a | b):
+            group[root(j)] = root(i)
+    sizes = Counter(root(i) for i in range(len(posts)))
+    return [p for i, p in enumerate(posts) if sizes[root(i)] < WAVE_MIN_POSTS]
 
 
 def clean_post_text(text: str, address: Optional[str]) -> str:
@@ -1063,7 +1116,7 @@ def _fetch_items(
     posts = [
         p for p in posts if not is_promo(p["text"], address) and has_words(p["text"])
     ]
-    return posts, headlines, mentions
+    return drop_waves(posts), headlines, mentions
 
 
 def analyze(

@@ -1029,3 +1029,72 @@ def test_resolve_token_rejects_odd_chain_id(monkeypatch: Any) -> None:
     )
     info = tool.resolve_token(ADDRESS)
     assert info is not None and info["chain"] is None
+
+
+def _texts(*texts: str) -> List[Dict[str, Any]]:
+    """Build posts with the given texts."""
+    return [{"id": str(i), "text": t, "engagement": 0} for i, t in enumerate(texts)]
+
+
+def test_drop_waves_drops_groups_of_near_copies() -> None:
+    """Three posts reusing a template are dropped; different posts are kept."""
+    posts = _texts(
+        "Degens are loading on Robinhood Chain Diamond Pons flying today",
+        "Alpha spotted @a Degens are loading on Robinhood Chain Diamond Pons flying",
+        "Degens are loading on Robinhood Chain #robinhood Diamond Pons mooning today",
+        "Team shipped the bridge and volume doubled since the listing",
+    )
+    assert [p["id"] for p in tool.drop_waves(posts)] == ["3"]
+
+
+def test_drop_waves_keeps_pairs() -> None:
+    """Two near copies are not a wave."""
+    posts = _texts(
+        "loving the new staking page on this token",
+        "loving the new staking page for this token",
+        "the bridge is down again since this morning",
+    )
+    assert tool.drop_waves(posts) == posts
+
+
+def test_drop_waves_never_links_short_posts() -> None:
+    """Posts with fewer than WAVE_MIN_WORDS words are kept even when identical."""
+    posts = _texts(
+        "$PEPE going to the moon",
+        "going to the moon $PEPE https://t.co/x",
+        "GOING TO THE MOON #PEPE",
+    )
+    assert tool.drop_waves(posts) == posts
+
+
+def test_drop_waves_ignores_case_links_and_addresses() -> None:
+    """Copies that differ only in case, links or addresses are one wave."""
+    base = "the team shipped the new bridge today"
+    posts = _texts(
+        base.upper() + " https://t.co/aa https://t.co/bb https://t.co/cc",
+        base + " https://t.co/dd https://t.co/ee https://t.co/ff " + ADDRESS,
+        base.title() + f" robinhood:{ADDRESS} https://t.co/gg https://t.co/hh",
+    )
+    assert not tool.drop_waves(posts)
+
+
+def test_drop_waves_links_chains_of_copies() -> None:
+    """A group counts copies linked through each other, not only direct pairs."""
+    # the first and second posts only link through the last one
+    posts = _texts(
+        "one two three four five",
+        "one two three seven six",
+        "eight nine ten eleven twelve",
+        "one two three four six",
+    )
+    assert [p["id"] for p in tool.drop_waves(posts)] == ["2"]
+
+
+def test_waves_dropped_before_scoring(stubs: Dict[str, MagicMock]) -> None:
+    """Wave posts never reach the LLM."""
+    posts = _posts(5)
+    for i in (1, 2, 4):
+        posts[i]["text"] = f"THIS TICKER WORTH TO BUY $PEPE CTO strong community {i}"
+    stubs["x"].return_value = (posts, 5, [])
+    _run(PEPE_PROMPT)
+    assert [p["id"] for p in stubs["score"].call_args.args[3]] == ["100", "103"]
