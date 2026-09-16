@@ -1,7 +1,7 @@
 {
     "dev": {
         "agent/valory/mech_social/0.1.0": "bafybeiftt5qfhrpfm64uljk7mmcmumkbjjrrfmulleyebzzpd5x4oezace",
-        "service/valory/mech_social/0.1.0": "bafybeibr4jluws552dd7yw2xefb6ihn4d4ouihgtcqqdel4sf5rqksgrh4"
+        "service/valory/mech_social/0.1.0": "bafybeidzeczip2gp2skvrzwow5nsnwplxan4mfxxpe5eidf7uoc6andgja"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",
