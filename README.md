@@ -43,6 +43,32 @@ fork mech. The `upstream_pins` setting in `pyproject.toml` names the release.
     autonomy packages lock
     ```
 
+4. Add each third-party service that the tool calls to the
+   [Integrations](#integrations) section.
+
+## Integrations
+
+The tools in this repository call third-party services. The service operator
+supplies the API keys through the `API_KEYS` environment variable, which maps
+each key name to a list of keys. The repository contains no keys.
+
+The following table lists the services that the `token_social_sentiment` tool
+calls:
+
+| Service | Purpose | Key name in `API_KEYS` | If the service fails |
+| --- | --- | --- | --- |
+| [X API](https://docs.x.com/x-api) (`api.x.com`) | Recent post search and post counts | `x_bearer` | The tool continues with news only and reports `x`, `x_partial`, or `x_counts` in `degraded_sources`. |
+| [Serper](https://serper.dev/) (`google.serper.dev`) | News headlines | `serperapi` | The tool continues with X posts only and reports `news` in `degraded_sources`. |
+| [DexScreener](https://docs.dexscreener.com/) (`api.dexscreener.com`) | Token symbol, address, and chain verification | None | The tool continues with unverified input and reports `dexscreener` in `degraded_sources`. |
+| [OpenAI API](https://platform.openai.com/docs) | Token extraction from free text and sentiment labels | `openai` | The request fails with an `llm_error` error. Without a key, the request fails with an `internal` error. |
+
+If both X and Serper fail, or if the `API_KEYS` variable has neither an
+`x_bearer` key nor a `serperapi` key, the request fails with a
+`source_unavailable` error.
+
+None of these services has a fallback provider. The tool doesn't hold or move
+funds. Review this list at each release.
+
 ## Update the mech packages
 
 1. Copy the `third_party` hashes from `packages/packages.json` in the target
