@@ -62,9 +62,10 @@ override-dependencies = ["cffi<2.1"]
 # service live under packages/valory/. Pin packages_paths to the primary
 # first-party author so the env vars the canonical envs export resolve.
 packages_paths = "packages/valory"
-# tests/ is first-party Python at the repo root. Listing it also gives the
-# linters a target while the repo has no dev customs yet.
-service_specific_packages_extra = ["tests"]
+# scripts/ and tests/ are first-party Python at the repo root. scripts comes
+# first: the darglint env appends /* to the last entry, and darglint silently
+# skips a literal "scripts/*" argument (tests/ stays unchecked, as before).
+service_specific_packages_extra = ["scripts", "tests"]
 # First-party tests live under tests/ and in each dev custom; without
 # pinning, auto-discovery picks up upstream packages/valory/skills/.../tests/
 # whose tendermint-binary deps don't apply downstream.

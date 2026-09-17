@@ -51,7 +51,8 @@ skills:
 - valory/termination_abci:0.1.0:bafybeih6sa2ttcvvjk7rcfn7ure2ws23kcfufssb4qmluzcfvednkfpvoi
 - valory/transaction_settlement_abci:0.1.0:bafybeihizaapype5sz7vlosms3nfo6jzfj4ujycuf5uthviq2otvmw6f6m
 - valory/websocket_client:0.1.0:bafybeiht2ify5vkseeulutzjwkw5vcmhcwtun2o5ehn6hya6uz4eanua2m
-customs: []
+customs:
+- valory/token_social_sentiment:0.1.0:bafybeiauntkkfugwpyjfrr6rljqiuy6rzdviqxdkrdav2gbvofhnu5kqvy
 default_ledger: ethereum
 required_ledgers:
 - ethereum
@@ -88,6 +89,8 @@ dependencies:
     version: ==6.21.6
   open-aea-ledger-ethereum:
     version: ==2.2.9
+  openai:
+    version: ==1.93.0
   requests:
     version: ==2.32.5
 default_connection: null

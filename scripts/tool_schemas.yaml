@@ -1,0 +1,71 @@
+# Input/output schemas published in metadata.json for each tool.
+# `defaults` maps a kind to its schemas; `tool_kinds` maps every wire name
+# (an entry of a tool's ALLOWED_TOOLS) to a kind. There is no fallback kind.
+# The result description carries the output fields requesters need; each
+# tool's module docstring has the full rules.
+
+defaults:
+  social_sentiment:
+    input:
+      type: text
+      description: >-
+        One token per request: a JSON object {"symbol", "address", "chain",
+        "window_seconds"} with symbol or address required, or free text such
+        as "How is sentiment on $PEPE today?"
+    output:
+      type: object
+      description: A JSON object containing the social sentiment for the token
+      schema:
+        type: object
+        properties:
+          requestId:
+            type: integer
+            description: Unique identifier for the request
+          result:
+            type: string
+            description: >-
+              Result in JSON format as a string, always with every key.
+              sentiment: (bullish - bearish) / on-topic sample items, -1 to 1,
+              null below 5 on-topic items. breakdown: number of on-topic sample
+              items (posts plus headlines) per class, not mentions. mentions:
+              all X posts matching the search in the window, spam included.
+              posts_analyzed: on-topic X posts in the sample (at most 40).
+              warnings: list of {type, message}, type symbol_mismatch,
+              chain_mismatch, symbol_unverified or address_not_listed.
+              degraded_sources: sources that failed while a result was still
+              produced (x, x_partial, x_counts, news, dexscreener). error: null
+              or {type, message}, type invalid_input, source_unavailable,
+              llm_error or internal.
+            example: |-
+              {
+                "token": "ABC",
+                "address": "0x1111111111111111111111111111111111111111",
+                "chain": "base",
+                "window_seconds": 86400,
+                "sentiment": 0.5,
+                "mentions": 1250,
+                "posts_analyzed": 9,
+                "breakdown": {"bullish": 6, "neutral": 3, "bearish": 1},
+                "reasoning": "Most on-topic posts react positively to a new exchange listing.",
+                "top_posts": [
+                  "https://x.com/i/web/status/1000000000000000001",
+                  "https://x.com/i/web/status/1000000000000000002",
+                  "https://x.com/i/web/status/1000000000000000003",
+                  "https://x.com/i/web/status/1000000000000000004",
+                  "https://x.com/i/web/status/1000000000000000005"
+                ],
+                "headlines": [{"title": "ABC lists on a new exchange", "url": "https://example.com/abc"}],
+                "warnings": [],
+                "degraded_sources": [],
+                "error": null
+              }
+          prompt:
+            type: string
+            description: The prompt passed to the tool.
+        required:
+          - requestId
+          - result
+          - prompt
+
+tool_kinds:
+  token_social_sentiment: social_sentiment
