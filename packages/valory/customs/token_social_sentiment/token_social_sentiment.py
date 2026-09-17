@@ -56,7 +56,7 @@ Output (JSON string, always all keys):
 - reasoning: short explanation, plus notes (ambiguous or shared ticker,
   tokenized stock, small sample, posts dropped as promotion or copies, failed
   lookups or sources, and the warnings below). With no score it also gives the
-  X query and how many posts matched, were sampled, dropped and off-topic.
+  X query and how many posts matched, were sampled, dropped and not on-topic.
 - warnings: list of {"type": "symbol_mismatch" | "chain_mismatch" |
   "symbol_unverified" | "address_not_listed", "message": "..."}, empty when
   none. symbol_mismatch: the symbol (given or extracted from free text) is not
@@ -1288,7 +1288,8 @@ def _fetch_items(
     :param target: _resolve_target() result.
     :param api_keys: KeyChain or dict with `serperapi` and `x_bearer`.
     :param window_seconds: time window.
-    :param run_state: shared "notes" and "degraded" lists, "cost" in USD, and
+    :param run_state: shared "notes" and "degraded" lists, "cost" in USD,
+        "x_query" (None when X was not searched), "sampled_posts" and
         "dropped_posts" (posts removed as promotion, wordless posts or copies).
     :return: (posts, headlines, mentions).
     """
@@ -1355,13 +1356,14 @@ def _fetch_items(
 
 
 def _sample_note(
-    run_state: RunState, mentions: Optional[int], off_topic_posts: int
+    run_state: RunState, mentions: Optional[int], unscored_posts: int
 ) -> List[str]:
     """Describe the X search behind a result with no score.
 
     :param run_state: "x_query", "sampled_posts" and "dropped_posts".
     :param mentions: posts matching the query, None if unknown.
-    :param off_topic_posts: kept posts the scoring call put off-topic.
+    :param unscored_posts: kept posts the scoring call did not count as on-topic
+        (off-topic, unlabelled or put in two classes).
     :return: one sentence, or none when X was not searched.
     """
     if run_state["x_query"] is None:
@@ -1370,8 +1372,8 @@ def _sample_note(
     return [
         f"X search {run_state['x_query']}: {matching} matching posts, "
         f"{run_state['sampled_posts']} sampled, {run_state['dropped_posts']} "
-        f"dropped as promotion, wordless posts or copies, {off_topic_posts} "
-        f"off-topic."
+        f"dropped as promotion, wordless posts or copies, {unscored_posts} "
+        f"not on-topic."
     ]
 
 
@@ -1443,13 +1445,6 @@ def analyze(
             notes + empty + _sample_note(run_state, result["mentions"], 0)
         )
         return result
-    if dropped and not posts:
-        # headlines are still scored: tell a spam-only X sample apart from a
-        # quiet token
-        notes.append(
-            f"All {dropped} X posts in the sample were dropped as promotion, "
-            f"wordless posts or copies."
-        )
 
     sent_posts = [
         {**p, "text": clean_post_text(p["text"], target["address"])} for p in posts
@@ -1495,6 +1490,13 @@ def analyze(
             )
         )
         return result
+    if dropped and not posts:
+        # headlines alone were scored: tell a spam-only X sample apart from a
+        # quiet token
+        notes.append(
+            f"All {dropped} X posts in the sample were dropped as promotion, "
+            f"wordless posts or copies."
+        )
     if on_topic < SMALL_SAMPLE_ITEMS:
         notes.append(f"Based on only {on_topic} on-topic items.")
     breakdown = {
