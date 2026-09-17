@@ -18,8 +18,58 @@
 # ------------------------------------------------------------------------------
 """Social sentiment for a single token from X posts and news headlines.
 
-Input and output are documented in the `description` of this package's
-component.yaml, which the mech publishes as the tool description.
+Input (the request `prompt`, one of):
+- JSON: {"symbol": "PONS", "address": "0x39dB...", "chain": "robinhood",
+  "window_seconds": 86400}. `symbol` or `address` is required; `chain` and
+  `window_seconds` are optional; an empty string counts as not given.
+  - symbol: ticker, letters and digits, starts with a letter, at most 15
+    characters, a leading `$` is ignored.
+  - address: EVM contract address (0x + 40 hex). When DexScreener lists it,
+    its symbol and chain replace mismatching `symbol` / `chain` values. The
+    address of a Robinhood Chain tokenized stock or ETF (DexScreener name
+    "<Company> <bullet> Robinhood Token", e.g. the NVDA token) is measured by
+    the underlying stock: posts and news about the stock itself count. It
+    applies only when that token is the only one with this naming for the
+    ticker in the DexScreener search (at most 30 pairs), so a copy found next
+    to the real token blocks it.
+  - chain: DexScreener chain id (e.g. robinhood, ethereum, base); taken from
+    the address when not given.
+  - window_seconds: integer, default 86400, clamped to 3600..604740.
+- Free text, e.g. "How is sentiment on $PEPE today?". The ticker comes from a
+  $cashtag, otherwise from one LLM extraction call; an address is only used if
+  it is written in the text. Two or more tokens or addresses are rejected.
+
+Output (JSON string, always all keys):
+- token, address, chain, window_seconds: what was actually analyzed.
+- sentiment: (bullish - bearish) / (bullish + neutral + bearish), from -1 to
+  1. Null (and breakdown null) when fewer than 5 on-topic items.
+- breakdown: NUMBER of on-topic sample items (posts_analyzed posts plus the
+  returned headlines) that are bullish / neutral / bearish. It counts sample
+  items, not `mentions`.
+- mentions: total X posts matching the search in the window (X counts
+  endpoint). Includes spam and off-topic posts; it measures attention, not
+  sentiment.
+- posts_analyzed: X posts in the sample that are about the token (the
+  sample is at most 40 posts spread over the window).
+- headlines: news headlines in the sample that are about the token.
+- top_posts: links to the on-topic posts with the most engagement.
+- reasoning: short explanation, plus notes (ambiguous or shared ticker,
+  tokenized stock, small sample, posts dropped as promotion or copies, failed
+  lookups or sources, and the warnings below).
+- warnings: list of {"type": "symbol_mismatch" | "chain_mismatch" |
+  "symbol_unverified" | "address_not_listed", "message": "..."}, empty when
+  none. symbol_mismatch: the symbol (given or extracted from free text) is not
+  the contract address's; the address's symbol is analyzed. chain_mismatch:
+  the address has no DexScreener pair on the requested chain; its busiest
+  chain is used. symbol_unverified: DexScreener lists the address, but its
+  listed symbol is not a plain ticker, so a given symbol is used unchecked.
+  address_not_listed: no DexScreener pair has the address as its base token,
+  so nothing about the token is verified.
+- degraded_sources: sources that failed while the request still produced a
+  result: "x" (all X search slices), "x_partial" (some slices), "x_counts",
+  "news", "dexscreener".
+- error: null, or {"type": "invalid_input" | "source_unavailable" |
+  "llm_error" | "internal", "message": "..."}; data fields are null then.
 """
 
 import html
