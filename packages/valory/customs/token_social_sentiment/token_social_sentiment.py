@@ -125,30 +125,14 @@ X_END_TIME_MARGIN_SECONDS = 30
 MAX_CASHTAGS_PER_POST = 4
 # promotion markers; a post with any of them is dropped before the LLM. Group
 # invites are matched as phrases, so posts about Telegram itself (TON, NOT)
-# are kept
+# are kept. Vote and listing campaigns are left to the scoring call, which
+# tells them apart from governance votes and labels them off_topic
 PROMO_RE = re.compile(
     r"t\.me/|\b(?:whatsapp|airdrop|giveaway|dm me|nominat\w*)\b"
     r"|\bdon['\u2019]?t miss\b"
     r"|\b(?:join|official)\b[^.!?\n]{0,20}\btelegram\b"
     r"|\btelegram (?:is here|is live)\b",
     re.IGNORECASE,
-)
-# a vote is promotion when it is an explicit call or names a ranking site
-# ("vote for $PEPE", "vote on CMC"), which governance posts almost never do, or
-# when it is "vote here" or sits next to a listing cue in a post without
-# governance words ("cast your vote on Snapshot", "vote now on the fee switch")
-VOTE_RE = re.compile(r"\bvot(?:e|es|ed|ing)\b", re.IGNORECASE)
-STRONG_VOTE_CALL_RE = re.compile(
-    r"\bvote for (?:\$|us\b|me\b)|\b(?:cmc|coinmarketcap|coingecko)\b",
-    re.IGNORECASE,
-)
-VOTE_CALL_RE = re.compile(r"\bvote here\b", re.IGNORECASE)
-CAMPAIGN_CUE_RE = re.compile(
-    r"\blisting\b|\bleaderboard\b|\bca\s*:|\blink below\b|\bsupport ?= ?vote\b",
-    re.IGNORECASE,
-)
-GOVERNANCE_RE = re.compile(
-    r"\b(?:governance|proposals?|snapshot|dao|quorum|tally)\b", re.IGNORECASE
 )
 # posts with fewer real words than this (after removing handles, tags and
 # addresses) carry no opinion, e.g. "robinhood:0x39db..." or "@user $PONS";
@@ -800,10 +784,8 @@ def is_promo(text: str, address: Optional[str]) -> bool:
     """Tell whether a post is promotion rather than an opinion.
 
     Drops posts that carry a contract address other than the target's (shills
-    for other tokens, copycats), posts with group, giveaway or nomination
-    markers, and vote campaigns: an explicit call ("vote for $X") or a ranking
-    site (CMC, CoinGecko), or "vote here" or a listing cue in a post without
-    governance words.
+    for other tokens, copycats) and posts with group, giveaway or nomination
+    markers.
 
     :param text: post text.
     :param address: target contract address, if known.
@@ -814,14 +796,6 @@ def is_promo(text: str, address: Optional[str]) -> bool:
     if any(a.lower() != target for a in ADDRESS_RE.findall(stripped)):
         return True
     if BASE58_ADDRESS_RE.search(stripped):
-        return True
-    if VOTE_RE.search(text) and (
-        STRONG_VOTE_CALL_RE.search(text)
-        or (
-            not GOVERNANCE_RE.search(text)
-            and (VOTE_CALL_RE.search(text) or CAMPAIGN_CUE_RE.search(text))
-        )
-    ):
         return True
     return bool(PROMO_RE.search(text))
 
