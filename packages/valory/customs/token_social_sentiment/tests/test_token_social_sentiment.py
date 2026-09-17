@@ -72,6 +72,17 @@ def _labels(
     )
 
 
+def _search_note(
+    matching: str, sampled: int, dropped: int, unscored: int, symbol: str = "PEPE"
+) -> str:
+    """The X search sentence ending a result with no score."""
+    return (
+        f'X search (${symbol} OR "{ADDRESS}") -is:retweet: {matching} matching '
+        f"posts, {sampled} sampled, {dropped} dropped as promotion, wordless posts "
+        f"or copies, {unscored} not on-topic."
+    )
+
+
 def _run(prompt: str, keys: Any = None, **kwargs: Any) -> Dict:
     """Run the tool and decode its JSON result."""
     response = tool.run(
@@ -459,20 +470,36 @@ def test_no_data_is_not_an_error(stubs: Dict[str, MagicMock]) -> None:
     assert result["sentiment"] is None
     assert result["top_posts"] == []
     assert result["headlines"] == []
-    assert "No posts or organic news" in result["reasoning"]
+    assert result["reasoning"] == (
+        f"{result['warnings'][0]['message']} No posts or organic news found in the "
+        f"window. {_search_note('0', 0, 0, 0)}"
+    )
     stubs["score"].assert_not_called()
 
 
+def test_no_data_with_unknown_mentions(stubs: Dict[str, MagicMock]) -> None:
+    """A missing X count is worded as unknown in the search note."""
+    stubs["x"].return_value = ([], None, ["x_counts"], 0.0)
+    stubs["news"].return_value = []
+    result = _run(PEPE_PROMPT)
+    assert result["reasoning"] == (
+        "X post count unavailable. No posts or organic news found in the window. "
+        + _search_note("an unknown number of", 0, 0, 0)
+    )
+
+
 @pytest.mark.parametrize(
-    "labels",
+    "labels, unscored",
     [
-        _labels(),
-        _labels(bullish=["p1", "p2"], neutral=["p3", "n1"]),
-        _labels(bullish=["p1", "p99", "x"], bearish=["n9"]),
+        (_labels(), 8),
+        (_labels(bullish=["p1", "p2"], neutral=["p3", "n1"]), 5),
+        (_labels(bullish=["p1", "p99", "x"], bearish=["n9"]), 7),
+        # p1 in two classes and p3..p8 unlabelled: all counted as not on-topic
+        (_labels(bullish=["p1", "p2"], off_topic=["p1"]), 7),
     ],
 )
 def test_too_few_on_topic_gives_null_sentiment(
-    stubs: Dict[str, MagicMock], labels: tool.ItemLabels
+    stubs: Dict[str, MagicMock], labels: tool.ItemLabels, unscored: int
 ) -> None:
     """Fewer than MIN_ON_TOPIC_ITEMS valid on-topic items gives no score."""
     stubs["score"].return_value = labels
@@ -481,6 +508,16 @@ def test_too_few_on_topic_gives_null_sentiment(
     assert result["sentiment"] is None
     assert result["breakdown"] is None
     assert "too few for a reliable score" in result["reasoning"]
+    assert result["reasoning"].endswith(_search_note("1830", 8, 0, unscored))
+
+
+def test_no_sample_note_without_x_search(stubs: Dict[str, MagicMock]) -> None:
+    """Without an X key a result with no score does not describe an X search."""
+    stubs["news"].return_value = []
+    result = _run(PEPE_PROMPT, keys={"openai": "sk", "serperapi": "s"})
+    assert result["reasoning"] == (
+        "X unavailable. No posts or organic news found in the window."
+    )
 
 
 def test_min_on_topic_boundary_scores(stubs: Dict[str, MagicMock]) -> None:
@@ -1571,9 +1608,8 @@ def test_all_posts_dropped_is_noted(stubs: Dict[str, MagicMock]) -> None:
     result = _run(PEPE_PROMPT)
     assert result["sentiment"] is None
     assert result["mentions"] == 250
-    assert result["reasoning"].endswith(
-        "All 3 X posts in the sample were dropped as promotion, wordless posts or "
-        "copies. No organic news found in the window."
+    assert result["reasoning"] == (
+        f"No organic news found in the window. {_search_note('250', 3, 3, 0)}"
     )
     stubs["score"].assert_not_called()
 
@@ -1585,10 +1621,7 @@ def test_all_posts_dropped_without_news_search(stubs: Dict[str, MagicMock]) -> N
         post["text"] = "join our group https://t.me/pepepump"
     stubs["x"].return_value = (posts, 250, [], 0.0)
     result = _run(PEPE_PROMPT, keys={"openai": "sk", "x_bearer": "x"})
-    assert result["reasoning"] == (
-        "news unavailable. All 3 X posts in the sample were dropped as promotion, "
-        "wordless posts or copies."
-    )
+    assert result["reasoning"] == (f"news unavailable. {_search_note('250', 3, 3, 0)}")
 
 
 def test_all_posts_dropped_is_noted_when_news_is_scored(
@@ -1604,6 +1637,24 @@ def test_all_posts_dropped_is_noted_when_news_is_scored(
     result = _run(PEPE_PROMPT)
     assert result["sentiment"] == 1.0
     assert "All 3 X posts in the sample were dropped" in result["reasoning"]
+
+
+def test_all_posts_dropped_and_too_few_headlines_states_dropped_once(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """With no score the dropped count comes only from the search note."""
+    posts = _posts(3)
+    for post in posts:
+        post["text"] = "join our group https://t.me/pepepump"
+    stubs["x"].return_value = (posts, 250, [], 0.0)
+    stubs["news"].return_value = _headlines(2)
+    stubs["score"].return_value = _labels(bullish=["n1"])
+    result = _run(PEPE_PROMPT)
+    assert result["sentiment"] is None
+    assert result["reasoning"] == (
+        "Only 1 post(s) or news item(s) about this token in the window, too few "
+        f"for a reliable score. {_search_note('250', 3, 3, 0)}"
+    )
 
 
 def test_resolve_token_fdv_from_busiest_pair_that_reports_one(
