@@ -50,7 +50,11 @@ Output (JSON string, always all keys):
   items, not `mentions`.
 - mentions: total X posts matching the search in the window (X counts
   endpoint). Includes spam and off-topic posts; it measures attention, not
-  sentiment.
+  sentiment. The search excludes the bot templates listed in
+  X_QUERY_EXCLUSIONS, so it is lower than a bare cashtag count.
+- mentions_trend: {"recent": n, "previous": m}, matching posts in the newer
+  half of the window and in the older half. Null when the count is
+  unavailable.
 - posts_analyzed: X posts in the sample that are about the token (the
   sample is at most 40 posts spread over the window).
 - headlines: news headlines in the sample that are about the token.
@@ -176,6 +180,12 @@ SERPER_QUERY_USD = 0.001
 LLM_TIMEOUT = 30
 LLM_MAX_RETRIES = 1
 
+# Bot templates excluded in the query itself. In the blind-labelled samples
+# only 4% of the posts carrying "CA:" are on-topic, and dropping them at the
+# source leaves the 40-post budget for real posts: on-topic items went from 8
+# to 22 (ORBIO), 11 to 25 (QUBIT), 2 to 4 (OPTIMUS), unchanged for ENA.
+X_QUERY_EXCLUSIONS = '-"watch update" -"detect paid" -"CA:"'
+
 X_SEARCH_URL = "https://api.x.com/2/tweets/search/recent"
 X_COUNTS_URL = "https://api.x.com/2/tweets/counts/recent"
 SERPER_NEWS_URL = "https://google.serper.dev/news"
@@ -242,6 +252,7 @@ OUTPUT_KEYS = (
     "window_seconds",
     "sentiment",
     "mentions",
+    "mentions_trend",
     "posts_analyzed",
     "breakdown",
     "reasoning",
@@ -672,7 +683,7 @@ def build_x_query(
     :param address: token contract address.
     :param chain: chain name, used to narrow a shared ticker.
     :param narrow: the ticker is shared with larger tokens; avoid a bare cashtag.
-    :return: X search query string.
+    :return: X search query string, with the bot templates excluded.
     """
     terms = []
     if symbol and not narrow:
@@ -681,7 +692,7 @@ def build_x_query(
         terms.append(f'(${symbol} "{chain}")')
     if address:
         terms.append(f'"{address}"')
-    return f"({' OR '.join(terms)}) -is:retweet"
+    return f"({' OR '.join(terms)}) {X_QUERY_EXCLUSIONS} -is:retweet"
 
 
 def _dedupe_key(text: str) -> str:
@@ -696,8 +707,10 @@ def _dedupe_key(text: str) -> str:
 
 def fetch_x_posts(
     bearer: str, query: str, start_time: datetime, end_time: datetime
-) -> Tuple[List[Dict[str, Any]], Optional[int], List[str], float]:
-    """Fetch X posts spread over the window, and the total post count.
+) -> Tuple[
+    List[Dict[str, Any]], Optional[int], Optional[Dict[str, int]], List[str], float
+]:
+    """Fetch X posts spread over the window, the post count and its trend.
 
     A failed slice is skipped; the search only raises if every slice fails.
 
@@ -706,6 +719,7 @@ def fetch_x_posts(
     :param start_time: window start.
     :param end_time: window end.
     :return: (posts as {id, text, engagement}, total mentions or None,
+        {"recent", "previous"} matching posts per half of the window or None,
         degraded sources among "x_partial" and "x_counts", cost in USD of the
         posts read and the counts request).
     """
@@ -771,6 +785,7 @@ def fetch_x_posts(
     degraded = ["x_partial"] if failed_slices else []
 
     mentions = None
+    trend = None
     try:
         counts = requests.get(
             X_COUNTS_URL,
@@ -779,19 +794,46 @@ def fetch_x_posts(
                 "query": query,
                 "start_time": start_time.strftime(fmt),
                 "end_time": end_time.strftime(fmt),
-                "granularity": "day",
+                # hourly costs the same as daily and carries the trend
+                "granularity": "hour",
             },
             timeout=HTTP_TIMEOUT,
         )
         counts.raise_for_status()
         cost += X_COUNTS_REQUEST_USD
-        meta = counts.json().get("meta") or {}
+        body = counts.json()
+        meta = body.get("meta") or {}
         mentions = meta.get("total_tweet_count", meta.get("total_post_count"))
+        trend = _mentions_trend(body.get("data"), start_time, end_time)
     except (requests.RequestException, ValueError, AttributeError) as e:
         print(f"[token_social_sentiment] X counts unavailable: {e}")
     if mentions is None:
         degraded.append("x_counts")
-    return posts, mentions, degraded, cost
+    return posts, mentions, trend, degraded, cost
+
+
+def _mentions_trend(
+    buckets: Any, start_time: datetime, end_time: datetime
+) -> Optional[Dict[str, int]]:
+    """Split the hourly counts into the newer and the older half of the window.
+
+    :param buckets: the "data" list of the X counts response.
+    :param start_time: window start.
+    :param end_time: window end.
+    :return: {"recent", "previous"}, or None when the buckets are unusable.
+    """
+    if not isinstance(buckets, list) or not buckets:
+        return None
+    middle = start_time + (end_time - start_time) / 2
+    halves = {"recent": 0, "previous": 0}
+    for bucket in buckets:
+        try:
+            when = datetime.fromisoformat(str(bucket["start"]).replace("Z", "+00:00"))
+            count = int(bucket["tweet_count"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        halves["recent" if when >= middle else "previous"] += count
+    return halves
 
 
 def is_promo(text: str, address: Optional[str]) -> bool:
@@ -1298,7 +1340,12 @@ def _fetch_items(
     api_keys: Any,
     window_seconds: int,
     run_state: RunState,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]], Optional[int]]:
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, str]],
+    Optional[int],
+    Optional[Dict[str, int]],
+]:
     """Fetch X posts and news headlines for the target.
 
     :param target: _resolve_target() result.
@@ -1307,7 +1354,7 @@ def _fetch_items(
     :param run_state: shared "notes" and "degraded" lists, "cost" in USD,
         "x_query" (None when X was not searched), "sampled_posts" and
         "dropped_posts" (posts removed as promotion, wordless posts or copies).
-    :return: (posts, headlines, mentions).
+    :return: (posts, headlines, mentions, mentions trend).
     """
     notes, degraded = run_state["notes"], run_state["degraded"]
     symbol, address, chain, narrow = (
@@ -1321,12 +1368,13 @@ def _fetch_items(
     posts: List[Dict[str, Any]] = []
     headlines: List[Dict[str, str]] = []
     mentions = None
+    trend = None
 
     x_bearer = _api_key(api_keys, "x_bearer")
     if x_bearer:
         try:
             query = build_x_query(symbol, address, chain, narrow=narrow)
-            posts, mentions, x_degraded, x_cost = fetch_x_posts(
+            posts, mentions, trend, x_degraded, x_cost = fetch_x_posts(
                 x_bearer, query, start_time, end_time
             )
             degraded.extend(x_degraded)
@@ -1368,7 +1416,7 @@ def _fetch_items(
     )
     run_state["sampled_posts"] = len(posts)
     run_state["dropped_posts"] = len(posts) - len(kept)
-    return kept, headlines, mentions
+    return kept, headlines, mentions, trend
 
 
 def _sample_note(
@@ -1439,7 +1487,7 @@ def analyze(
     result["address"] = target["address"]
     result["chain"] = target["chain"]
 
-    posts, headlines, result["mentions"] = _fetch_items(
+    posts, headlines, result["mentions"], result["mentions_trend"] = _fetch_items(
         target, api_keys, result["window_seconds"], run_state
     )
     _count_source_cost(counter_callback, model, run_state["cost"])
