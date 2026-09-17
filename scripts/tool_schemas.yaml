@@ -1,8 +1,8 @@
 # Input/output schemas published in metadata.json for each tool.
 # `defaults` maps a kind to its schemas; `tool_kinds` maps every wire name
 # (an entry of a tool's ALLOWED_TOOLS) to a kind. There is no fallback kind.
-# The fields themselves are documented in each tool's component.yaml
-# description, which metadata.json publishes next to these schemas.
+# The result description carries the output fields requesters need; each
+# tool's module docstring has the full rules.
 
 defaults:
   social_sentiment:
@@ -23,7 +23,19 @@ defaults:
             description: Unique identifier for the request
           result:
             type: string
-            description: Result in JSON format as a string, see the tool description
+            description: >-
+              Result in JSON format as a string, always with every key.
+              sentiment: (bullish - bearish) / on-topic sample items, -1 to 1,
+              null below 5 on-topic items. breakdown: number of on-topic sample
+              items (posts plus headlines) per class, not mentions. mentions:
+              all X posts matching the search in the window, spam included.
+              posts_analyzed: on-topic X posts in the sample (at most 40).
+              warnings: list of {type, message}, type symbol_mismatch,
+              chain_mismatch, symbol_unverified or address_not_listed.
+              degraded_sources: sources that failed while a result was still
+              produced (x, x_partial, x_counts, news, dexscreener). error: null
+              or {type, message}, type invalid_input, source_unavailable,
+              llm_error or internal.
             example: |-
               {
                 "token": "ABC",

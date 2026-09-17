@@ -900,9 +900,21 @@ def test_is_ambiguous_ticker(volumes: Any, expected: bool) -> None:
         ("Telegram now uses $TON for all mini-app payments", False),
         ("Uniswap fee switch vote passes, $UNI up 20%", False),
         ("Snapshot vote for AIP-12 is live $AAVE", False),
+        ("Cast your vote on Snapshot for AIP-420 before Friday", False),
+        ("Time to vote on the Uniswap fee switch", False),
+        ("Final vote counts: 90% yes on the $AAVE proposal", False),
+        ("The $AAVE governance vote nowhere close to quorum", False),
+        ("Governance vote now open on Tally for the $ENS endowment", False),
+        ("Telegram group chats now support TON payments", False),
+        ("Let\u2019s vote! $FLOKI listing", True),
         ("I voted yes on the $CAKE emissions proposal", False),
         ("Join our official Telegram for $PEPE signals", True),
-        ("Attention $INU Family! YOUR vote matters!", True),
+        (
+            "Attention $INU Family! YOUR vote matters! Less than 100 votes are "
+            "needed to list $INU on the Robinhood Top 100 Leaderboard.",
+            True,
+        ),
+        ("Attention $INU Family! YOUR vote matters!", False),
         ("$DPONS just landed CA: [CA] Support = vote", True),
         ("Vote for $PONS on the listing poll", True),
     ],
@@ -1575,6 +1587,49 @@ def test_all_posts_dropped_is_noted(stubs: Dict[str, MagicMock]) -> None:
     assert result["mentions"] == 250
     assert result["reasoning"].endswith(
         "All 3 X posts in the sample were dropped as promotion, wordless posts or "
-        "copies, and no organic news was found."
+        "copies. No organic news found in the window."
     )
     stubs["score"].assert_not_called()
+
+
+def test_all_posts_dropped_without_news_search(stubs: Dict[str, MagicMock]) -> None:
+    """With no news key the note does not claim that news was searched."""
+    posts = _posts(3)
+    for post in posts:
+        post["text"] = "join our group https://t.me/pepepump"
+    stubs["x"].return_value = (posts, 250, [], 0.0)
+    result = _run(PEPE_PROMPT, keys={"openai": "sk", "x_bearer": "x"})
+    assert result["reasoning"] == (
+        "news unavailable. All 3 X posts in the sample were dropped as promotion, "
+        "wordless posts or copies."
+    )
+
+
+def test_all_posts_dropped_is_noted_when_news_is_scored(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """Headlines alone are scored, and the note says the X sample was all dropped."""
+    posts = _posts(3)
+    for post in posts:
+        post["text"] = "join our group https://t.me/pepepump"
+    stubs["x"].return_value = (posts, 250, [], 0.0)
+    stubs["news"].return_value = _headlines(6)
+    stubs["score"].return_value = _labels(bullish=["n1", "n2", "n3", "n4", "n5"])
+    result = _run(PEPE_PROMPT)
+    assert result["sentiment"] == 1.0
+    assert "All 3 X posts in the sample were dropped" in result["reasoning"]
+
+
+def test_resolve_token_fdv_falls_back_when_busiest_pair_has_none(
+    monkeypatch: Any,
+) -> None:
+    """A busy pool without FDV does not zero the FDV reported by other pairs."""
+    pairs = [
+        _pair("FUN", ADDRESS, 900),
+        {**_pair("FUN", ADDRESS, 10), "fdv": 5e6},
+    ]
+    monkeypatch.setattr(
+        tool.requests, "get", MagicMock(return_value=_dex_response(pairs))
+    )
+    info = tool.resolve_token(ADDRESS)
+    assert info is not None and info["fdv"] == 5e6

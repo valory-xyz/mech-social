@@ -114,16 +114,21 @@ X_END_TIME_MARGIN_SECONDS = 30
 # posts naming this many different cashtags are ticker lists, not opinions
 MAX_CASHTAGS_PER_POST = 4
 # promotion markers; a post with any of them is dropped before the LLM. Group
-# invites and listing-vote campaigns are matched as phrases, so posts about
-# Telegram itself (TON, NOT) or about governance votes (UNI, ARB) are kept
+# invites are matched as phrases, so posts about Telegram itself (TON, NOT)
+# are kept
 PROMO_RE = re.compile(
     r"t\.me/|\b(?:whatsapp|airdrop|giveaway|dm me|nominat\w*)\b"
     r"|\bdon['\u2019]?t miss\b"
     r"|\b(?:join|official)\b[^.!?\n]{0,20}\btelegram\b"
-    r"|\btelegram (?:is here|is live|group|channel)\b"
-    r"|\b(?:your|every|cast|drop a|let'?s|time to|need your) votes?\b"
-    r"|\bvotes? (?:matters?|counts?|helps?|needed|link|dashboard)\b"
-    r"|\bvote (?:if|now|here|ca\b)|\bvote for (?:\$|us\b|me\b)|\bsupport ?= ?vote\b",
+    r"|\btelegram (?:is here|is live)\b",
+    re.IGNORECASE,
+)
+# a vote is promotion only next to a listing-campaign cue, so governance votes
+# ("cast your vote on Snapshot", "vote on the fee switch") are kept
+VOTE_RE = re.compile(r"\bvot(?:e|es|ed|ing)\b", re.IGNORECASE)
+CAMPAIGN_CUE_RE = re.compile(
+    r"listing|leaderboard|dashboard|\bca\s*:|top 100|link below|support ?= ?vote"
+    r"|if you['\u2019]?re (?:in|early)",
     re.IGNORECASE,
 )
 # posts with fewer real words than this (after removing handles, tags and
@@ -520,8 +525,10 @@ def resolve_token(
         # same check as a requested chain: it goes into the X query and prompt
         "chain": chain if CHAIN_RE.match(chain) else None,
         "volume": sum(_pair_volume(p) for p in own),
-        # the busiest pair: a side pair with a wrong USD price can inflate FDV
-        "fdv": _pair_number(top, "fdv"),
+        # the busiest pair: a side pair with a wrong USD price can inflate FDV;
+        # other pairs only when the busiest one reports none
+        "fdv": _pair_number(top, "fdv")
+        or max((_pair_number(p, "fdv") for p in own), default=0.0),
         "stock": _is_stock_pair(top),
     }
 
@@ -761,8 +768,8 @@ def is_promo(text: str, address: Optional[str]) -> bool:
     """Tell whether a post is promotion rather than an opinion.
 
     Drops posts that carry a contract address other than the target's (shills
-    for other tokens, copycats) and posts with group, giveaway, vote or
-    nomination markers.
+    for other tokens, copycats), posts with group, giveaway or nomination
+    markers, and listing-vote campaigns.
 
     :param text: post text.
     :param address: target contract address, if known.
@@ -773,6 +780,8 @@ def is_promo(text: str, address: Optional[str]) -> bool:
     if any(a.lower() != target for a in ADDRESS_RE.findall(stripped)):
         return True
     if BASE58_ADDRESS_RE.search(stripped):
+        return True
+    if VOTE_RE.search(text) and CAMPAIGN_CUE_RE.search(text):
         return True
     return bool(PROMO_RE.search(text))
 
@@ -1381,16 +1390,23 @@ def analyze(
     result["headlines"] = []
     result["top_posts"] = []
 
-    if not posts and not headlines:
-        dropped = run_state["dropped_posts"]
-        # tell a spam-only token apart from a quiet one
-        empty = (
+    dropped = run_state["dropped_posts"]
+    if dropped and not posts:
+        # tell a spam-only sample apart from a quiet token, also when headlines
+        # are still scored
+        notes.append(
             f"All {dropped} X posts in the sample were dropped as promotion, "
-            f"wordless posts or copies, and no organic news was found."
-            if dropped
-            else "No posts or organic news found in the window."
+            f"wordless posts or copies."
         )
-        result["reasoning"] = " ".join(notes + [empty])
+    if not posts and not headlines:
+        news_searched = "news" not in run_state["degraded"]
+        if dropped:
+            empty = ["No organic news found in the window."] if news_searched else []
+        elif news_searched:
+            empty = ["No posts or organic news found in the window."]
+        else:
+            empty = ["No posts found in the window."]
+        result["reasoning"] = " ".join(notes + empty)
         return result
 
     sent_posts = [
