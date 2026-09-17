@@ -459,7 +459,11 @@ def test_no_data_is_not_an_error(stubs: Dict[str, MagicMock]) -> None:
     assert result["sentiment"] is None
     assert result["top_posts"] == []
     assert result["headlines"] == []
-    assert "No posts or organic news" in result["reasoning"]
+    assert result["reasoning"].endswith(
+        "No posts or organic news found in the window. X search ($PEPE OR "
+        f'"{ADDRESS}") -is:retweet: 0 matching posts, 0 sampled, 0 dropped as '
+        "promotion, wordless posts or copies, 0 off-topic."
+    )
     stubs["score"].assert_not_called()
 
 
@@ -481,6 +485,22 @@ def test_too_few_on_topic_gives_null_sentiment(
     assert result["sentiment"] is None
     assert result["breakdown"] is None
     assert "too few for a reliable score" in result["reasoning"]
+    on_topic_posts = {"p1", "p2", "p3"} & (
+        set(labels.bullish) | set(labels.neutral) | set(labels.bearish)
+    )
+    assert result["reasoning"].endswith(
+        f"1830 matching posts, 8 sampled, 0 dropped as promotion, wordless posts "
+        f"or copies, {8 - len(on_topic_posts)} off-topic."
+    )
+
+
+def test_no_sample_note_without_x_search(stubs: Dict[str, MagicMock]) -> None:
+    """Without an X key a result with no score does not describe an X search."""
+    stubs["news"].return_value = []
+    result = _run(PEPE_PROMPT, keys={"openai": "sk", "serperapi": "s"})
+    assert result["reasoning"] == (
+        "X unavailable. No posts or organic news found in the window."
+    )
 
 
 def test_min_on_topic_boundary_scores(stubs: Dict[str, MagicMock]) -> None:
@@ -1572,8 +1592,9 @@ def test_all_posts_dropped_is_noted(stubs: Dict[str, MagicMock]) -> None:
     assert result["sentiment"] is None
     assert result["mentions"] == 250
     assert result["reasoning"].endswith(
-        "All 3 X posts in the sample were dropped as promotion, wordless posts or "
-        "copies. No organic news found in the window."
+        "No organic news found in the window. X search ($PEPE OR "
+        f'"{ADDRESS}") -is:retweet: 250 matching posts, 3 sampled, 3 dropped as '
+        "promotion, wordless posts or copies, 0 off-topic."
     )
     stubs["score"].assert_not_called()
 
@@ -1585,9 +1606,10 @@ def test_all_posts_dropped_without_news_search(stubs: Dict[str, MagicMock]) -> N
         post["text"] = "join our group https://t.me/pepepump"
     stubs["x"].return_value = (posts, 250, [], 0.0)
     result = _run(PEPE_PROMPT, keys={"openai": "sk", "x_bearer": "x"})
-    assert result["reasoning"] == (
-        "news unavailable. All 3 X posts in the sample were dropped as promotion, "
-        "wordless posts or copies."
+    assert result["reasoning"].startswith("news unavailable. X search ")
+    assert result["reasoning"].endswith(
+        "250 matching posts, 3 sampled, 3 dropped as promotion, wordless posts or "
+        "copies, 0 off-topic."
     )
 
 

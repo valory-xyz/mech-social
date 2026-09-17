@@ -55,7 +55,8 @@ Output (JSON string, always all keys):
 - top_posts: links to the on-topic posts with the most engagement.
 - reasoning: short explanation, plus notes (ambiguous or shared ticker,
   tokenized stock, small sample, posts dropped as promotion or copies, failed
-  lookups or sources, and the warnings below).
+  lookups or sources, and the warnings below). With no score it also gives the
+  X query and how many posts matched, were sampled, dropped and off-topic.
 - warnings: list of {"type": "symbol_mismatch" | "chain_mismatch" |
   "symbol_unverified" | "address_not_listed", "message": "..."}, empty when
   none. symbol_mismatch: the symbol (given or extracted from free text) is not
@@ -250,6 +251,8 @@ class RunState(TypedDict):
     warnings: List[Dict[str, str]]
     cost: float
     dropped_posts: int
+    x_query: Optional[str]
+    sampled_posts: int
 
 
 class ToolError(Exception):
@@ -1305,14 +1308,13 @@ def _fetch_items(
     x_bearer = _api_key(api_keys, "x_bearer")
     if x_bearer:
         try:
+            query = build_x_query(symbol, address, chain, narrow=narrow)
             posts, mentions, x_degraded, x_cost = fetch_x_posts(
-                x_bearer,
-                build_x_query(symbol, address, chain, narrow=narrow),
-                start_time,
-                end_time,
+                x_bearer, query, start_time, end_time
             )
             degraded.extend(x_degraded)
             run_state["cost"] += x_cost
+            run_state["x_query"] = query
         except requests.RequestException as e:
             print(f"[token_social_sentiment] X search failed: {e}")
             degraded.append("x")
@@ -1347,8 +1349,30 @@ def _fetch_items(
     kept = drop_waves(
         [p for p in posts if not is_promo(p["text"], address) and has_words(p["text"])]
     )
+    run_state["sampled_posts"] = len(posts)
     run_state["dropped_posts"] = len(posts) - len(kept)
     return kept, headlines, mentions
+
+
+def _sample_note(
+    run_state: RunState, mentions: Optional[int], off_topic_posts: int
+) -> List[str]:
+    """Describe the X search behind a result with no score.
+
+    :param run_state: "x_query", "sampled_posts" and "dropped_posts".
+    :param mentions: posts matching the query, None if unknown.
+    :param off_topic_posts: kept posts the scoring call put off-topic.
+    :return: one sentence, or none when X was not searched.
+    """
+    if run_state["x_query"] is None:
+        return []
+    matching = "an unknown number of" if mentions is None else str(mentions)
+    return [
+        f"X search {run_state['x_query']}: {matching} matching posts, "
+        f"{run_state['sampled_posts']} sampled, {run_state['dropped_posts']} "
+        f"dropped as promotion, wordless posts or copies, {off_topic_posts} "
+        f"off-topic."
+    ]
 
 
 def analyze(
@@ -1387,6 +1411,8 @@ def analyze(
         "warnings": [],
         "cost": 0.0,
         "dropped_posts": 0,
+        "x_query": None,
+        "sampled_posts": 0,
     }
     result["degraded_sources"] = run_state["degraded"]
     result["warnings"] = run_state["warnings"]
@@ -1405,13 +1431,6 @@ def analyze(
     result["top_posts"] = []
 
     dropped = run_state["dropped_posts"]
-    if dropped and not posts:
-        # tell a spam-only sample apart from a quiet token, also when headlines
-        # are still scored
-        notes.append(
-            f"All {dropped} X posts in the sample were dropped as promotion, "
-            f"wordless posts or copies."
-        )
     if not posts and not headlines:
         news_searched = "news" not in run_state["degraded"]
         if dropped:
@@ -1420,8 +1439,17 @@ def analyze(
             empty = ["No posts or organic news found in the window."]
         else:
             empty = ["No posts found in the window."]
-        result["reasoning"] = " ".join(notes + empty)
+        result["reasoning"] = " ".join(
+            notes + empty + _sample_note(run_state, result["mentions"], 0)
+        )
         return result
+    if dropped and not posts:
+        # headlines are still scored: tell a spam-only X sample apart from a
+        # quiet token
+        notes.append(
+            f"All {dropped} X posts in the sample were dropped as promotion, "
+            f"wordless posts or copies."
+        )
 
     sent_posts = [
         {**p, "text": clean_post_text(p["text"], target["address"])} for p in posts
@@ -1462,6 +1490,9 @@ def analyze(
                 f"Only {on_topic} post(s) or news item(s) about this token in the "
                 f"window, too few for a reliable score."
             ]
+            + _sample_note(
+                run_state, result["mentions"], len(posts) - len(on_topic_posts)
+            )
         )
         return result
     if on_topic < SMALL_SAMPLE_ITEMS:
