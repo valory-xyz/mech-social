@@ -54,7 +54,8 @@ Output (JSON string, always all keys):
   X_QUERY_EXCLUSIONS, so it is lower than a bare cashtag count.
 - mentions_trend: {"recent": n, "previous": m}, matching posts in the newer
   half of the window and in the older half. Null when the count is
-  unavailable.
+  unavailable, and for windows under MIN_TREND_BUCKETS hours, which the
+  hourly counts cannot split.
 - posts_analyzed: X posts in the sample that are about the token (the
   sample is at most 40 posts spread over the window).
 - headlines: news headlines in the sample that are about the token.
@@ -185,6 +186,10 @@ LLM_MAX_RETRIES = 1
 # source leaves the 40-post budget for real posts: on-topic items went from 8
 # to 22 (ORBIO), 11 to 25 (QUBIT), 2 to 4 (OPTIMUS), unchanged for ENA.
 X_QUERY_EXCLUSIONS = '-"watch update" -"detect paid" -"CA:"'
+
+# hourly counts split into halves need enough buckets for the split to mean
+# something: with one or two, a bucket that straddles the middle decides it
+MIN_TREND_BUCKETS = 4
 
 X_SEARCH_URL = "https://api.x.com/2/tweets/search/recent"
 X_COUNTS_URL = "https://api.x.com/2/tweets/counts/recent"
@@ -820,9 +825,10 @@ def _mentions_trend(
     :param buckets: the "data" list of the X counts response.
     :param start_time: window start.
     :param end_time: window end.
-    :return: {"recent", "previous"}, or None when the buckets are unusable.
+    :return: {"recent", "previous"}, or None when the buckets are unusable or
+        too few to split.
     """
-    if not isinstance(buckets, list) or not buckets:
+    if not isinstance(buckets, list) or len(buckets) < MIN_TREND_BUCKETS:
         return None
     middle = start_time + (end_time - start_time) / 2
     halves = {"recent": 0, "previous": 0}

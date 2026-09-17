@@ -819,10 +819,18 @@ def test_fetch_x_posts_counts_hourly_and_splits_the_trend(monkeypatch: Any) -> N
 
 
 @pytest.mark.parametrize(
-    "buckets", [None, [], "nope", [{"start": "2026-09-16T00:00:00Z"}], [{"x": 1}]]
+    "buckets",
+    [
+        None,
+        [],
+        "nope",
+        [{"start": "2026-09-16T00:00:00Z", "tweet_count": 1}] * 3,
+        [{"start": "2026-09-16T00:00:00Z"}] * 4,
+        [{"x": 1}] * 4,
+    ],
 )
 def test_mentions_trend_needs_usable_buckets(buckets: Any) -> None:
-    """Missing or malformed counts buckets give no trend instead of a guess."""
+    """Missing, malformed or too few counts buckets give no trend."""
     end = datetime(2026, 9, 16, tzinfo=timezone.utc)
     assert tool._mentions_trend(buckets, end - timedelta(hours=24), end) is None
 
