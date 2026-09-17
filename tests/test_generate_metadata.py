@@ -75,3 +75,24 @@ def test_tool_without_kind_fails() -> None:
         generate_metadata.build_tools_metadata(
             [entry], registry, generate_metadata.METADATA_TEMPLATE, []
         )
+
+
+def test_stale_result_example_fails() -> None:
+    """An example whose keys differ from the tool's OUTPUT_KEYS is not published."""
+    schemas = {
+        "input": {},
+        "output": {
+            "schema": {"properties": {"result": {"example": '{"sentiment": 0.5}'}}}
+        },
+    }
+    registry = {"defaults": {"kind": schemas}, "tool_kinds": {"new": "kind"}}
+    entry = {
+        "tool_name": "new_tool",
+        "description": "",
+        "allowed_tools": ["new"],
+        "output_keys": ("sentiment", "error"),
+    }
+    with pytest.raises(ValueError, match="do not match"):
+        generate_metadata.build_tools_metadata(
+            [entry], registry, generate_metadata.METADATA_TEMPLATE, []
+        )

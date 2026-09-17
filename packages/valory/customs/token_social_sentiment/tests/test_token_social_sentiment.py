@@ -793,7 +793,8 @@ def test_resolve_token(monkeypatch: Any) -> None:
         "symbol": "FUN",
         "chain": "robinhood",
         "volume": 100.0,
-        "fdv": 5e6,
+        # FDV of the busiest pair, not the largest one
+        "fdv": 4e6,
         "stock": False,
     }
 
@@ -894,7 +895,16 @@ def test_is_ambiguous_ticker(volumes: Any, expected: bool) -> None:
         ("@GoPlusSecurity I nominate $PEPE #DeepScanAudit", True),
         ("$PEPE Telegram is live", True),
         ("Don't miss $PEPE", True),
+        ("Don\u2019t miss $PEPE", True),
         ("devoted $PEPE holder since launch", False),
+        ("Telegram now uses $TON for all mini-app payments", False),
+        ("Uniswap fee switch vote passes, $UNI up 20%", False),
+        ("Snapshot vote for AIP-12 is live $AAVE", False),
+        ("I voted yes on the $CAKE emissions proposal", False),
+        ("Join our official Telegram for $PEPE signals", True),
+        ("Attention $INU Family! YOUR vote matters!", True),
+        ("$DPONS just landed CA: [CA] Support = vote", True),
+        ("Vote for $PONS on the listing poll", True),
     ],
 )
 def test_is_promo(text: str, expected: bool) -> None:
@@ -1338,15 +1348,23 @@ class _EmptyKeyChain:
         return self.services[name][0]
 
 
-def test_service_with_empty_key_list_is_unavailable(
-    stubs: Dict[str, MagicMock],
+@pytest.mark.parametrize(
+    "service,error,degraded",
+    [
+        ("x_bearer", None, ["x"]),
+        ("serperapi", None, ["news"]),
+        ("openai", {"type": "internal", "message": "missing openai API key"}, []),
+    ],
+)
+def test_service_with_empty_key_list(
+    stubs: Dict[str, MagicMock], service: str, error: Any, degraded: List[str]
 ) -> None:
-    """An empty key list degrades that source instead of failing the request."""
-    keys = _EmptyKeyChain({"openai": ["sk"], "serperapi": ["s"], "x_bearer": []})
-    result = _run(PEPE_PROMPT, keys=keys)  # type: ignore[arg-type]
-    assert result["error"] is None
-    assert result["degraded_sources"] == ["x"]
-    stubs["x"].assert_not_called()
+    """An empty key list never raises: sources degrade, no openai key is internal."""
+    services = {"openai": ["sk"], "serperapi": ["s"], "x_bearer": ["x"]}
+    services[service] = []
+    result = _run(PEPE_PROMPT, keys=_EmptyKeyChain(services))  # type: ignore[arg-type]
+    assert result["error"] == error
+    assert result["degraded_sources"] == degraded
 
 
 def test_post_text_cannot_close_the_data_block() -> None:
@@ -1369,8 +1387,9 @@ def test_post_text_cannot_close_the_data_block() -> None:
 
 def test_worst_case_runtime_fits_default_task_deadline() -> None:
     """Every call timing out still ends before the mech's default 240 s deadline."""
-    # 2 DexScreener + 4 X slices + counts + Serper; extraction and scoring calls
-    http_calls, llm_calls, retry_backoff = 8, 2, 1
+    # 2 DexScreener + X slices + counts + Serper; extraction and scoring calls
+    http_calls = 2 + tool.X_SLICES + 1 + 1
+    llm_calls, retry_backoff = 2, 1
     worst = http_calls * tool.HTTP_TIMEOUT + llm_calls * (
         (tool.LLM_MAX_RETRIES + 1) * tool.LLM_TIMEOUT + retry_backoff
     )
@@ -1386,24 +1405,6 @@ def test_stock_named_token_missing_from_search_is_not_a_stock(
     result = _run(json.dumps({"address": AAPL_ADDRESS}))
     assert "Tokenized stock" not in result["reasoning"]
     assert stubs["news"].call_args.args[1] != '"NVDA" stock'
-
-
-@pytest.mark.parametrize("service", ["serperapi", "openai"])
-def test_other_services_with_empty_key_list(
-    stubs: Dict[str, MagicMock], service: str
-) -> None:
-    """Empty key lists never raise: news degrades, a missing openai key is internal."""
-    services = {"openai": ["sk"], "serperapi": ["s"], "x_bearer": ["x"]}
-    services[service] = []
-    result = _run(PEPE_PROMPT, keys=_EmptyKeyChain(services))  # type: ignore[arg-type]
-    if service == "serperapi":
-        assert result["error"] is None
-        assert result["degraded_sources"] == ["news"]
-    else:
-        assert result["error"] == {
-            "type": "internal",
-            "message": "missing openai API key",
-        }
 
 
 def test_counts_http_error_is_not_billed(monkeypatch: Any) -> None:
@@ -1535,3 +1536,45 @@ def test_symbol_only_and_free_text_address_have_no_warnings(
     """Requests without a mismatch never carry warnings."""
     assert not _run(json.dumps({"symbol": "PEPE"}))["warnings"]
     assert not _run(f"How is $PEPE ({ADDRESS}) doing?")["warnings"]
+
+
+def test_fdv_exactly_at_threshold_is_not_narrowed(stubs: Dict[str, MagicMock]) -> None:
+    """FDV equal to NARROW_MAX_FDV counts as established: broad query."""
+    stubs["resolve"].return_value = {
+        "symbol": "MAGIC",
+        "chain": "arbitrum",
+        "volume": 2_786.0,
+        "fdv": float(tool.NARROW_MAX_FDV),
+    }
+    stubs["volumes"].return_value = {"0xother": 377_990.0}
+    _run(json.dumps({"symbol": "MAGIC", "address": ADDRESS}))
+    assert stubs["x"].call_args.args[1].startswith("($MAGIC OR")
+
+
+def test_drop_waves_links_at_exactly_the_threshold() -> None:
+    """Word sets overlapping exactly WAVE_MIN_JACCARD (6 of 10 words) are linked."""
+    shared = "alpha beta gamma delta epsilon zeta"
+    posts = _texts(
+        shared + " eta theta",
+        shared + " iota kappa",
+        shared + " eta theta",
+        "lambda omicron sigma upsilon omega",
+    )
+    assert [p["id"] for p in tool.drop_waves(posts)] == ["3"]
+
+
+def test_all_posts_dropped_is_noted(stubs: Dict[str, MagicMock]) -> None:
+    """A spam-only sample says so instead of reading as a quiet token."""
+    posts = _posts(3)
+    for post in posts:
+        post["text"] = "join our group https://t.me/pepepump"
+    stubs["x"].return_value = (posts, 250, [], 0.0)
+    stubs["news"].return_value = []
+    result = _run(PEPE_PROMPT)
+    assert result["sentiment"] is None
+    assert result["mentions"] == 250
+    assert result["reasoning"].endswith(
+        "All 3 X posts in the sample were dropped as promotion, wordless posts or "
+        "copies, and no organic news was found."
+    )
+    stubs["score"].assert_not_called()

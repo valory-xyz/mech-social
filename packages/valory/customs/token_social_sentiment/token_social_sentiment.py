@@ -18,58 +18,8 @@
 # ------------------------------------------------------------------------------
 """Social sentiment for a single token from X posts and news headlines.
 
-Input (the request `prompt`, one of):
-- JSON: {"symbol": "PONS", "address": "0x39dB...", "chain": "robinhood",
-  "window_seconds": 86400}. `symbol` or `address` is required; `chain` and
-  `window_seconds` are optional; an empty string counts as not given.
-  - symbol: ticker, letters and digits, starts with a letter, at most 15
-    characters, a leading `$` is ignored.
-  - address: EVM contract address (0x + 40 hex). When DexScreener lists it,
-    its symbol and chain replace mismatching `symbol` / `chain` values. The
-    address of a Robinhood Chain tokenized stock or ETF (DexScreener name
-    "<Company> <bullet> Robinhood Token", e.g. the NVDA token) is measured by
-    the underlying stock: posts and news about the stock itself count. It
-    applies only when that token is the only one with this naming for the
-    ticker in the DexScreener search (at most 30 pairs), so a copy found next
-    to the real token blocks it.
-  - chain: DexScreener chain id (e.g. robinhood, ethereum, base); taken from
-    the address when not given.
-  - window_seconds: integer, default 86400, clamped to 3600..604740.
-- Free text, e.g. "How is sentiment on $PEPE today?". The ticker comes from a
-  $cashtag, otherwise from one LLM extraction call; an address is only used if
-  it is written in the text. Two or more tokens or addresses are rejected.
-
-Output (JSON string, always all keys):
-- token, address, chain, window_seconds: what was actually analyzed.
-- sentiment: (bullish - bearish) / (bullish + neutral + bearish), from -1 to
-  1. Null (and breakdown null) when fewer than 5 on-topic items.
-- breakdown: NUMBER of on-topic sample items (posts_analyzed posts plus the
-  returned headlines) that are bullish / neutral / bearish. It counts sample
-  items, not `mentions`.
-- mentions: total X posts matching the search in the window (X counts
-  endpoint). Includes spam and off-topic posts; it measures attention, not
-  sentiment.
-- posts_analyzed: X posts in the sample that are about the token (the
-  sample is at most 40 posts spread over the window).
-- headlines: news headlines in the sample that are about the token.
-- top_posts: links to the on-topic posts with the most engagement.
-- reasoning: short explanation, plus notes (ambiguous or shared ticker,
-  tokenized stock, small sample, failed lookups or sources, and the warnings
-  below).
-- warnings: list of {"type": "symbol_mismatch" | "chain_mismatch" |
-  "symbol_unverified" | "address_not_listed", "message": "..."}, empty when
-  none. symbol_mismatch: the symbol (given or extracted from free text) is not
-  the contract address's; the address's symbol is analyzed. chain_mismatch:
-  the address has no DexScreener pair on the requested chain; its busiest
-  chain is used. symbol_unverified: DexScreener lists the address, but its
-  listed symbol is not a plain ticker, so a given symbol is used unchecked.
-  address_not_listed: no DexScreener pair has the address as its base token,
-  so nothing about the token is verified.
-- degraded_sources: sources that failed while the request still produced a
-  result: "x" (all X search slices), "x_partial" (some slices), "x_counts",
-  "news", "dexscreener".
-- error: null, or {"type": "invalid_input" | "source_unavailable" |
-  "llm_error" | "internal", "message": "..."}; data fields are null then.
+Input and output are documented in the `description` of this package's
+component.yaml, which the mech publishes as the tool description.
 """
 
 import html
@@ -113,11 +63,17 @@ POSTS_PER_SLICE = 10
 X_END_TIME_MARGIN_SECONDS = 30
 # posts naming this many different cashtags are ticker lists, not opinions
 MAX_CASHTAGS_PER_POST = 4
-# promotion markers; a post with any of them is dropped before the LLM. The
-# campaign words never appeared in an on-topic post across 310 labelled posts
+# promotion markers; a post with any of them is dropped before the LLM. Group
+# invites and listing-vote campaigns are matched as phrases, so posts about
+# Telegram itself (TON, NOT) or about governance votes (UNI, ARB) are kept
 PROMO_RE = re.compile(
-    r"t\.me/|\b(?:whatsapp|airdrop|giveaway|dm me|telegram|nominat\w*"
-    r"|vot(?:e|es|ed|ing)|don'?t miss)\b",
+    r"t\.me/|\b(?:whatsapp|airdrop|giveaway|dm me|nominat\w*)\b"
+    r"|\bdon['\u2019]?t miss\b"
+    r"|\b(?:join|official)\b[^.!?\n]{0,20}\btelegram\b"
+    r"|\btelegram (?:is here|is live|group|channel)\b"
+    r"|\b(?:your|every|cast|drop a|let'?s|time to|need your) votes?\b"
+    r"|\bvotes? (?:matters?|counts?|helps?|needed|link|dashboard)\b"
+    r"|\bvote (?:if|now|here|ca\b)|\bvote for (?:\$|us\b|me\b)|\bsupport ?= ?vote\b",
     re.IGNORECASE,
 )
 # posts with fewer real words than this (after removing handles, tags and
@@ -129,9 +85,8 @@ MIN_POST_CJK_CHARS = 4
 # template shill waves: posts from different accounts that reuse most of the
 # same words with small changes, which exact-copy dedupe misses. Posts whose
 # word sets overlap by at least WAVE_MIN_JACCARD are linked; a linked group of
-# WAVE_MIN_POSTS or more is dropped. On 13 evaluated requests this dropped 20
-# posts (signal-group copies, bot templates, "CA:" reply drops), all labelled
-# off-topic by a separate blind labelling pass
+# WAVE_MIN_POSTS or more is dropped (signal-group copies, bot templates,
+# "CA:" reply drops)
 WAVE_MIN_JACCARD = 0.6
 WAVE_MIN_POSTS = 3
 # shorter posts ("$PEPE going to the moon") share their few words by chance,
@@ -499,11 +454,7 @@ def resolve_token(
     pairs = _dex_get(DEXSCREENER_PAIRS_URL.format(address=address))
     if pairs is None:
         return None
-    own = [
-        p
-        for p in pairs
-        if str((p.get("baseToken") or {}).get("address", "")).lower() == address.lower()
-    ]
+    own = [p for p in pairs if _pair_address(p) == address.lower()]
     if not own:
         return {}
     on_chain = [p for p in own if str(p.get("chainId") or "").strip().lower() == chain]
@@ -519,7 +470,8 @@ def resolve_token(
         # same check as a requested chain: it goes into the X query and prompt
         "chain": chain if CHAIN_RE.match(chain) else None,
         "volume": sum(_pair_volume(p) for p in own),
-        "fdv": max((_pair_number(p, "fdv") for p in own), default=0.0),
+        # the busiest pair: a side pair with a wrong USD price can inflate FDV
+        "fdv": _pair_number(top, "fdv"),
         "stock": _is_stock_pair(top),
     }
 
@@ -1196,10 +1148,9 @@ def _resolve_target(
             notes.append("Tokenized-stock check failed; handled as a normal token.")
     if stock:
         # owner decision: a tokenized stock is measured by its underlying stock,
-        # so the search is not narrowed to the chain. No LLM note: without one
-        # the model already counts stock posts and drops same-ticker memecoins,
-        # and a note telling it that $TICKER posts count made it keep promo
-        # posts that only tag the ticker (AAPL: 6 of 34 items)
+        # so the search is not narrowed to the chain. There is no LLM note: the
+        # model already counts stock posts, and a note saying $TICKER posts
+        # count made it keep promo posts that only tag the ticker
         notes.append(
             f"Tokenized stock ${symbol}: posts and news about the stock itself "
             f"are counted."
@@ -1261,7 +1212,8 @@ def _fetch_items(
     :param target: _resolve_target() result.
     :param api_keys: KeyChain or dict with `serperapi` and `x_bearer`.
     :param window_seconds: time window.
-    :param run_state: shared "notes" and "degraded" lists, and "cost" in USD.
+    :param run_state: shared "notes" and "degraded" lists, "cost" in USD, and
+        "dropped_posts" (posts removed as promotion, wordless posts or copies).
     :return: (posts, headlines, mentions).
     """
     notes, degraded = run_state["notes"], run_state["degraded"]
@@ -1319,10 +1271,11 @@ def _fetch_items(
         notes.append("X post count unavailable.")
     if "news" in degraded:
         notes.append("news unavailable.")
-    posts = [
-        p for p in posts if not is_promo(p["text"], address) and has_words(p["text"])
-    ]
-    return drop_waves(posts), headlines, mentions
+    kept = drop_waves(
+        [p for p in posts if not is_promo(p["text"], address) and has_words(p["text"])]
+    )
+    run_state["dropped_posts"] = len(posts) - len(kept)
+    return kept, headlines, mentions
 
 
 def analyze(
@@ -1360,6 +1313,7 @@ def analyze(
         "degraded": [],
         "warnings": [],
         "cost": 0.0,
+        "dropped_posts": 0,
     }
     result["degraded_sources"] = run_state["degraded"]
     result["warnings"] = run_state["warnings"]
@@ -1378,9 +1332,15 @@ def analyze(
     result["top_posts"] = []
 
     if not posts and not headlines:
-        result["reasoning"] = " ".join(
-            notes + ["No posts or organic news found in the window."]
+        dropped = run_state["dropped_posts"]
+        # tell a spam-only token apart from a quiet one
+        empty = (
+            f"All {dropped} X posts in the sample were dropped as promotion, "
+            f"wordless posts or copies, and no organic news was found."
+            if dropped
+            else "No posts or organic news found in the window."
         )
+        result["reasoning"] = " ".join(notes + [empty])
         return result
 
     sent_posts = [

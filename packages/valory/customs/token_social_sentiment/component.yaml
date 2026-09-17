@@ -2,27 +2,42 @@ name: token_social_sentiment
 author: valory
 version: 0.1.0
 type: custom
-description: 'Measures social sentiment about one token. Input: a JSON prompt {"symbol",
-  "address", "chain", "window_seconds"} (symbol or EVM address required; window default
-  86400 s, 3600 to 604740) or free text such as "How is sentiment on $PEPE today?".
-  Reads up to 40 X posts spread over the window plus up to 10 news headlines, keeps
-  only items about the token (given the address of a Robinhood Chain tokenized stock
-  or ETF such as the NVDA token, posts and news about the stock itself count), and
-  returns JSON: sentiment (-1 to 1) = (bullish - bearish) / on-topic items, null below
-  5 on-topic items; breakdown = counts of on-topic sample items per class (not all
-  mentions); mentions = total X posts matching the search; posts_analyzed = on-topic
-  posts in the sample; top_posts; headlines; reasoning with notes; warnings = list
-  of {type, message} for symbol_mismatch, chain_mismatch (the values of the address
-  are analyzed), symbol_unverified or address_not_listed (token details unverified);
-  degraded_sources = sources that failed while a result was still produced; error
-  = null or {type, message}.'
+description: 'Measures social sentiment about one token from X posts and news headlines.
+  Input, the request prompt, is one of: (1) JSON {"symbol", "address", "chain", "window_seconds"},
+  symbol or address required, an empty string counts as not given; symbol: letters
+  and digits starting with a letter, at most 15, a leading $ is ignored; address:
+  EVM 0x + 40 hex, when DexScreener lists it its symbol and chain replace mismatching
+  values (see warnings), and the address of a Robinhood Chain tokenized stock or ETF
+  (the only token named "<Company> <bullet> Robinhood Token" for its ticker in the
+  DexScreener search, e.g. the NVDA token) is measured by the underlying stock; chain:
+  DexScreener chain id, taken from the address when not given; window_seconds: integer,
+  default 86400, clamped to 3600..604740. (2) Free text such as "How is sentiment
+  on $PEPE today?": the ticker comes from a $cashtag or one LLM extraction call, an
+  address is used only if written in the text, and two or more tokens or addresses
+  are rejected. Reads up to 40 X posts spread over the window and up to 10 news headlines,
+  and keeps only items about the token. Output is a JSON string with all keys: token,
+  address, chain, window_seconds = what was analyzed; sentiment = (bullish - bearish)
+  / on-topic items, -1 to 1, null (breakdown null too) below 5 on-topic items; breakdown
+  = number of on-topic sample items (posts plus headlines) per class, not mentions;
+  mentions = all X posts matching the search in the window, spam included; posts_analyzed
+  = on-topic X posts in the sample; headlines = on-topic news; top_posts = the most-engaged
+  on-topic posts; reasoning = short explanation plus notes (ambiguous, shared or tokenized-stock
+  ticker, small sample, dropped posts, failed lookups or sources, warnings); warnings
+  = list of {type, message}: symbol_mismatch (the symbol is not the symbol of the
+  address, which is analyzed), chain_mismatch (the address has no pair on the requested
+  chain; its busiest chain is used), symbol_unverified (the listed symbol is not a
+  plain ticker, so a given symbol is used unchecked), address_not_listed (no DexScreener
+  pair has the address as base token); degraded_sources = sources that failed while
+  a result was still produced: x, x_partial, x_counts, news, dexscreener; error =
+  null or {type: invalid_input | source_unavailable | llm_error | internal, message},
+  with data fields null.'
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeiegmjh5poyo6gdpp5gbikh5boskzqfoltzk2ulkqawleroopfunui
   tests/__init__.py: bafybeihqccfy6wls7e2jtgik5ddrmwpek5rztrielunr4tn2mtigvby6tu
-  tests/test_token_social_sentiment.py: bafybeibzozv5ra4con4ggwlg5di4eqd7beyriyoqicrtwrayi7bhjzceci
-  token_social_sentiment.py: bafybeih6rhenn76r63lrl5l2zggnkuv2i2resc5jqqux2ivurdophqc37m
+  tests/test_token_social_sentiment.py: bafybeifxmlgiavfil3xogeqssjxgicbbtgzfyqw2omxba75q53mhu5hhzm
+  token_social_sentiment.py: bafybeibjimayy66fdit5bpc5f7zwmbs2gmq3skuvgzzhrykqg4424sr5pi
 fingerprint_ignore_patterns: []
 entry_point: token_social_sentiment.py
 callable: run

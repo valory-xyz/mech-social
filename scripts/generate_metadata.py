@@ -84,6 +84,7 @@ def parse_tool_folder(sub: Path) -> Optional[Dict[str, Any]]:
         "tool_name": data["name"],
         "description": data["description"],
         "allowed_tools": tools,
+        "output_keys": getattr(module, "OUTPUT_KEYS", None),
     }
 
 
@@ -118,6 +119,18 @@ def load_schema_registry(path: Path) -> Dict[str, Any]:
     return {"defaults": defaults, "tool_kinds": tool_kinds}
 
 
+def check_example_keys(tool: str, schemas: Dict[str, Any], output_keys: Any) -> None:
+    """Fail when a published result example does not list the tool's output keys."""
+    if not output_keys:
+        return
+    properties = (schemas["output"].get("schema") or {}).get("properties") or {}
+    example = (properties.get("result") or {}).get("example")
+    if example is not None and list(json.loads(example)) != list(output_keys):
+        raise ValueError(
+            f"'{tool}': the result example keys do not match the tool's OUTPUT_KEYS"
+        )
+
+
 def build_tools_metadata(
     tools_data: List[Dict[str, Any]],
     registry: Dict[str, Any],
@@ -143,6 +156,7 @@ def build_tools_metadata(
                     f"'{tool}' has no kind in the schema registry tool_kinds"
                 )
             schemas = registry["defaults"][kind]
+            check_example_keys(tool, schemas, entry.get("output_keys"))
             result["tools"].append(tool)
             result["toolMetadata"][tool] = {
                 "name": entry["tool_name"],
