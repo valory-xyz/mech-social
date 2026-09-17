@@ -123,3 +123,24 @@ def test_output_keys_must_be_strings(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="must be a list or tuple of strings"):
         generate_metadata.parse_tool_folder(tool_dir)
+
+
+def test_empty_output_keys_are_checked() -> None:
+    """An empty OUTPUT_KEYS is checked against the example, not treated as missing."""
+    schemas = {
+        "input": {},
+        "output": {
+            "schema": {"properties": {"result": {"example": '{"sentiment": 0.5}'}}}
+        },
+    }
+    registry = {"defaults": {"kind": schemas}, "tool_kinds": {"new": "kind"}}
+    entry = {
+        "tool_name": "new_tool",
+        "description": "",
+        "allowed_tools": ["new"],
+        "output_keys": (),
+    }
+    with pytest.raises(ValueError, match="do not match"):
+        generate_metadata.build_tools_metadata(
+            [entry], registry, generate_metadata.METADATA_TEMPLATE, []
+        )

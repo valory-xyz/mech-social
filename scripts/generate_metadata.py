@@ -128,7 +128,7 @@ def load_schema_registry(path: Path) -> Dict[str, Any]:
 
 def check_example_keys(tool: str, schemas: Dict[str, Any], output_keys: Any) -> None:
     """Fail when a published result example does not list the tool's output keys."""
-    if not output_keys:
+    if output_keys is None:
         print(f"'{tool}' has no {OUTPUT_KEYS}: its result example is not checked")
         return
     properties = (schemas["output"].get("schema") or {}).get("properties") or {}

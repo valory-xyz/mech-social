@@ -914,6 +914,12 @@ def test_is_ambiguous_ticker(volumes: Any, expected: bool) -> None:
         ("Vote for $PEPE on CMC", True),
         ("$XYZ needs your votes! Vote here: bit.ly/xyz", True),
         ("Let\u2019s vote for $FLOKI fam", True),
+        ("Time to vote now on the Uniswap fee switch", False),
+        ("Delegates, vote now on the Arbitrum STIP", False),
+        ("Every vote counts in the Optimism Citizens House", False),
+        ("Vote for $PEPE on CMC, the DAO says go", True),
+        ("Tally up the votes fam, vote for $WIF on CMC", True),
+        ("$DOGE community snapshot: vote for $DOGE on CoinGecko", True),
         ("I voted yes on the $CAKE emissions proposal", False),
         ("Join our official Telegram for $PEPE signals", True),
         (

@@ -133,17 +133,18 @@ PROMO_RE = re.compile(
     r"|\btelegram (?:is here|is live)\b",
     re.IGNORECASE,
 )
-# a vote is promotion when it is a campaign call ("vote for $PEPE", "vote
-# here") or sits next to a listing or ranking cue; posts with governance words
-# ("cast your vote on Snapshot", "governance vote to add a listing") are kept
+# a vote is promotion when it is an explicit call or names a ranking site
+# ("vote for $PEPE", "vote on CMC"), which governance posts almost never do, or
+# when it is "vote here" or sits next to a listing cue in a post without
+# governance words ("cast your vote on Snapshot", "vote now on the fee switch")
 VOTE_RE = re.compile(r"\bvot(?:e|es|ed|ing)\b", re.IGNORECASE)
-VOTE_CALL_RE = re.compile(
-    r"\bvote for (?:\$|us\b|me\b)|\bevery vote\b|\bvote (?:here|now)\b",
+STRONG_VOTE_CALL_RE = re.compile(
+    r"\bvote for (?:\$|us\b|me\b)|\b(?:cmc|coinmarketcap|coingecko)\b",
     re.IGNORECASE,
 )
+VOTE_CALL_RE = re.compile(r"\bvote here\b", re.IGNORECASE)
 CAMPAIGN_CUE_RE = re.compile(
-    r"\blisting\b|\bleaderboard\b|\bca\s*:|\blink below\b|\bsupport ?= ?vote\b"
-    r"|\b(?:cmc|coinmarketcap|coingecko)\b",
+    r"\blisting\b|\bleaderboard\b|\bca\s*:|\blink below\b|\bsupport ?= ?vote\b",
     re.IGNORECASE,
 )
 GOVERNANCE_RE = re.compile(
@@ -800,7 +801,9 @@ def is_promo(text: str, address: Optional[str]) -> bool:
 
     Drops posts that carry a contract address other than the target's (shills
     for other tokens, copycats), posts with group, giveaway or nomination
-    markers, and listing-vote campaigns.
+    markers, and vote campaigns: an explicit call ("vote for $X") or a ranking
+    site (CMC, CoinGecko), or "vote here" or a listing cue in a post without
+    governance words.
 
     :param text: post text.
     :param address: target contract address, if known.
@@ -812,10 +815,12 @@ def is_promo(text: str, address: Optional[str]) -> bool:
         return True
     if BASE58_ADDRESS_RE.search(stripped):
         return True
-    if (
-        VOTE_RE.search(text)
-        and not GOVERNANCE_RE.search(text)
-        and (VOTE_CALL_RE.search(text) or CAMPAIGN_CUE_RE.search(text))
+    if VOTE_RE.search(text) and (
+        STRONG_VOTE_CALL_RE.search(text)
+        or (
+            not GOVERNANCE_RE.search(text)
+            and (VOTE_CALL_RE.search(text) or CAMPAIGN_CUE_RE.search(text))
+        )
     ):
         return True
     return bool(PROMO_RE.search(text))
