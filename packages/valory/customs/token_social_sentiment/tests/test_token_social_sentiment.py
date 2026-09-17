@@ -171,11 +171,33 @@ def test_post_text_cleaned_before_scoring(stubs: Dict[str, MagicMock]) -> None:
     assert stubs["score"].call_args.args[3][0]["text"] == "buy & hold [CA]"
 
 
-def test_free_text_cashtag_skips_llm_extraction(stubs: Dict[str, MagicMock]) -> None:
-    """A $TICKER in free text is used without an extraction call."""
-    result = _run("How is sentiment on $PEPE today?")
+def test_free_text_cashtag_with_address_skips_llm_extraction(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """A $TICKER with an address in free text is used without an extraction call."""
+    result = _run(f"How is sentiment on $PEPE {ADDRESS} today?")
     assert result["token"] == "PEPE"
     stubs["extract"].assert_not_called()
+
+
+def test_free_text_cashtag_without_address_is_checked(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """A $TICKER without an address keeps its ticker when extraction agrees."""
+    stubs["extract"].return_value = tool.ExtractedToken(symbols=["pepe"])
+    result = _run("How is sentiment on $PEPE today?")
+    assert result["token"] == "PEPE"
+    stubs["extract"].assert_called_once()
+
+
+def test_cashtag_and_named_token_rejected(stubs: Dict[str, MagicMock]) -> None:
+    """A cashtag plus a token named in words is two tokens, not the cashtag one."""
+    stubs["extract"].return_value = tool.ExtractedToken(symbols=["ETH"])
+    result = _run("Compare $BTC and Ethereum")
+    assert result["error"] == {
+        "type": "invalid_input",
+        "message": "one token per request, found 2: BTC, ETH",
+    }
 
 
 def test_free_text_uses_llm_extraction(stubs: Dict[str, MagicMock]) -> None:
@@ -936,6 +958,10 @@ def test_is_ambiguous_ticker(volumes: Any, expected: bool) -> None:
         ("Telegram now uses $TON for all mini-app payments", False),
         ("Telegram group chats now support TON payments", False),
         ("Join our official Telegram for $PEPE signals", True),
+        ("Detect PAID DEXScreener: $PEPE UNISWAP CA: [CA] VolumeBuy 24H: $0", True),
+        ("Listing watch update: $PEPE (robinhood) CA: [CA] vote link below", True),
+        ("Token watch update: $PEPE (robinhood) CA: [CA] support below", True),
+        ("I watch $PEPE every day and it keeps getting updates", False),
         # vote campaigns and governance votes both reach the scoring call,
         # which labels campaigns off_topic
         ("Vote for $PEPE on CMC", False),
@@ -973,6 +999,8 @@ def test_promo_posts_dropped_before_scoring(stubs: Dict[str, MagicMock]) -> None
         ("StreetInsider", "https://streetinsider.com/MarketMediaWire/x", True),
         ("Coinpedia", "https://coinpedia.org/press-release/x", True),
         ("Reuters", "https://reuters.com/markets/pepe", False),
+        ("MEXC", "https://www.mexc.co/price/PEPE", True),
+        ("MEXC", "https://www.mexc.com/learn/article/what-is-pepe", True),
     ],
 )
 def test_is_press_release(source: str, url: str, expected: bool) -> None:

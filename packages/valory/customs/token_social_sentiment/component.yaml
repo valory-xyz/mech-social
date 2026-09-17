@@ -13,8 +13,8 @@ aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeiegmjh5poyo6gdpp5gbikh5boskzqfoltzk2ulkqawleroopfunui
   tests/__init__.py: bafybeihqccfy6wls7e2jtgik5ddrmwpek5rztrielunr4tn2mtigvby6tu
-  tests/test_token_social_sentiment.py: bafybeigmznobxiu2iznns3x46p6qqhyugm4st46znlf42smrgioreryicm
-  token_social_sentiment.py: bafybeibd6nqusv35qoloegcbjn7uvr5w32vrvvnqh3oybqkwlmn3zoypfy
+  tests/test_token_social_sentiment.py: bafybeiblaexdtusbq7ofh2g5uc4wp6lo6fpvrezh44geapfcxe4nmk4ycm
+  token_social_sentiment.py: bafybeidr7p6d2fpoqxlgk3s4jxkzr2itubz3nv63plaxupupoaqmdzjvry
 fingerprint_ignore_patterns: []
 entry_point: token_social_sentiment.py
 callable: run
