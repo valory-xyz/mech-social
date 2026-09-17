@@ -11,16 +11,18 @@ description: 'Measures social sentiment about one token. Input: a JSON prompt {"
   returns JSON: sentiment (-1 to 1) = (bullish - bearish) / on-topic items, null below
   5 on-topic items; breakdown = counts of on-topic sample items per class (not all
   mentions); mentions = total X posts matching the search; posts_analyzed = on-topic
-  posts in the sample; top_posts; headlines; reasoning with notes; degraded_sources
-  = sources that failed while a result was still produced; error = null or {type,
-  message}.'
+  posts in the sample; top_posts; headlines; reasoning with notes; warnings = list
+  of {type, message} for symbol_mismatch, chain_mismatch (the values of the address
+  are analyzed), symbol_unverified or address_not_listed (token details unverified);
+  degraded_sources = sources that failed while a result was still produced; error
+  = null or {type, message}.'
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeiegmjh5poyo6gdpp5gbikh5boskzqfoltzk2ulkqawleroopfunui
   tests/__init__.py: bafybeihqccfy6wls7e2jtgik5ddrmwpek5rztrielunr4tn2mtigvby6tu
-  tests/test_token_social_sentiment.py: bafybeibaudmjis6agyv2p54mdav465x3z2ihk56arnqrwa55jclh6cinwm
-  token_social_sentiment.py: bafybeiertlqnbxugmm2x4vgst2a3cfvdv6phtbukevvrgks4nigna5jmoa
+  tests/test_token_social_sentiment.py: bafybeibzozv5ra4con4ggwlg5di4eqd7beyriyoqicrtwrayi7bhjzceci
+  token_social_sentiment.py: bafybeih6rhenn76r63lrl5l2zggnkuv2i2resc5jqqux2ivurdophqc37m
 fingerprint_ignore_patterns: []
 entry_point: token_social_sentiment.py
 callable: run

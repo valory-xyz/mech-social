@@ -134,6 +134,7 @@ def test_structured_happy_path(stubs: Dict[str, MagicMock]) -> None:
         f"https://x.com/i/web/status/{i}" for i in (106, 105, 104, 103, 102)
     ]
     assert result["degraded_sources"] == []
+    assert result["warnings"] == []
     assert "Based on only 8 on-topic items." in result["reasoning"]
     stubs["extract"].assert_not_called()
 
@@ -224,6 +225,7 @@ def test_invalid_input(stubs: Dict[str, MagicMock], prompt: str, message: str) -
     assert result["error"]["type"] == "invalid_input"
     assert message in result["error"]["message"]
     assert result["sentiment"] is None
+    assert result["warnings"] == []
 
 
 def test_empty_chain_is_not_given(stubs: Dict[str, MagicMock]) -> None:
@@ -269,8 +271,18 @@ def test_address_wins_on_symbol_and_chain_mismatch(stubs: Dict[str, MagicMock]) 
     )
     assert result["token"] == "PEPE2"
     assert result["chain"] == "base"
+    assert [w["type"] for w in result["warnings"]] == [
+        "symbol_mismatch",
+        "chain_mismatch",
+    ]
+    assert result["warnings"][0]["message"] == (
+        "Symbol PEPE does not match the contract address "
+        "(address belongs to PEPE2); analyzed PEPE2."
+    )
+    # the same text stays in reasoning for human readers
     assert "(address belongs to PEPE2)" in result["reasoning"]
     assert "Requested chain ethereum does not match" in result["reasoning"]
+    assert result["error"] is None
 
 
 def test_token_lookup_failure_is_degraded_and_noted(
@@ -281,6 +293,7 @@ def test_token_lookup_failure_is_degraded_and_noted(
     result = _run(PEPE_PROMPT)
     assert result["error"] is None
     assert result["degraded_sources"] == ["dexscreener"]
+    assert result["warnings"] == []
     assert "Token lookup failed" in result["reasoning"]
     stubs["search"].assert_not_called()
 
@@ -1045,6 +1058,7 @@ def test_symbol_only_lookup_failure_is_degraded_and_ambiguous(
     stubs["search"].return_value = None
     result = _run(json.dumps({"symbol": "PEPE"}))
     assert result["degraded_sources"] == ["dexscreener"]
+    assert result["warnings"] == []
     assert result["reasoning"].startswith("No contract address given")
 
 
@@ -1433,3 +1447,91 @@ def test_symbol_with_trailing_newline_is_rejected(stubs: Dict[str, MagicMock]) -
     result = _run(json.dumps({"symbol": "PEPE\n"}))
     assert result["error"]["type"] == "invalid_input"
     stubs["x"].assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "prompt,token",
+    [
+        (json.dumps({"symbol": "GNO", "address": ADDRESS, "chain": "gnosis"}), "GNO"),
+        (json.dumps({"address": ADDRESS}), None),
+    ],
+    ids=["with-symbol", "address-only"],
+)
+def test_address_not_listed_is_a_warning(
+    stubs: Dict[str, MagicMock], prompt: str, token: Any
+) -> None:
+    """An address DexScreener does not list is flagged; the request still runs."""
+    stubs["resolve"].return_value = {}
+    result = _run(prompt)
+    assert result["error"] is None
+    assert result["token"] == token
+    assert result["warnings"] == [
+        {
+            "type": "address_not_listed",
+            "message": "Contract address not found as a traded token on "
+            "DexScreener; token details not verified.",
+        }
+    ]
+    assert result["reasoning"].startswith("Contract address not found")
+    assert result["degraded_sources"] == []
+
+
+def test_warnings_kept_on_error(stubs: Dict[str, MagicMock]) -> None:
+    """A warning found before a later failure is still returned."""
+    stubs["resolve"].return_value = {**STOCK_INFO, "symbol": "PEPE2", "stock": False}
+    stubs["score"].side_effect = tool.ToolError("llm_error", "LLM returned no labels")
+    result = _run(PEPE_PROMPT)
+    assert result["error"]["type"] == "llm_error"
+    assert [w["type"] for w in result["warnings"]] == ["symbol_mismatch"]
+
+
+def test_resolve_token_prefers_requested_chain(monkeypatch: Any) -> None:
+    """An address on several chains uses the requested chain's pairs."""
+    pairs = [
+        {**_pair("ZRO", ADDRESS, 900, chain="base"), "fdv": 9.0},
+        {**_pair("ZRO", ADDRESS, 20, chain="arbitrum"), "fdv": 8.0},
+    ]
+    monkeypatch.setattr(
+        tool.requests, "get", MagicMock(return_value=_dex_response(pairs))
+    )
+    arbitrum = tool.resolve_token(ADDRESS, "arbitrum")
+    assert arbitrum is not None
+    assert (arbitrum["chain"], arbitrum["volume"], arbitrum["fdv"]) == (
+        "arbitrum",
+        20.0,
+        8.0,
+    )
+    other = tool.resolve_token(ADDRESS, "polygon")
+    assert other is not None and other["chain"] == "base"
+    assert other["volume"] == 920.0
+
+
+def test_requested_chain_is_passed_to_the_lookup(stubs: Dict[str, MagicMock]) -> None:
+    """The lookup gets the requested chain, so a valid one is not a mismatch."""
+    result = _run(
+        json.dumps({"symbol": "PEPE", "address": ADDRESS, "chain": "ethereum"})
+    )
+    stubs["resolve"].assert_called_once_with(ADDRESS, "ethereum")
+    assert result["warnings"] == []
+
+
+def test_listed_symbol_not_a_ticker_is_a_warning(stubs: Dict[str, MagicMock]) -> None:
+    """A given symbol cannot be checked against an unusable listed symbol."""
+    stubs["resolve"].return_value = {**STOCK_INFO, "symbol": None, "stock": False}
+    result = _run(json.dumps({"symbol": "DOGE", "address": ADDRESS}))
+    assert result["token"] == "DOGE"
+    assert result["warnings"] == [
+        {
+            "type": "symbol_unverified",
+            "message": "The contract address is listed without a plain ticker; "
+            "symbol DOGE not verified.",
+        }
+    ]
+
+
+def test_symbol_only_and_free_text_address_have_no_warnings(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """Requests without a mismatch never carry warnings."""
+    assert not _run(json.dumps({"symbol": "PEPE"}))["warnings"]
+    assert not _run(f"How is $PEPE ({ADDRESS}) doing?")["warnings"]

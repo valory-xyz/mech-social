@@ -54,7 +54,17 @@ Output (JSON string, always all keys):
 - headlines: news headlines in the sample that are about the token.
 - top_posts: links to the on-topic posts with the most engagement.
 - reasoning: short explanation, plus notes (ambiguous or shared ticker,
-  tokenized stock, small sample, failed lookups or sources).
+  tokenized stock, small sample, failed lookups or sources, and the warnings
+  below).
+- warnings: list of {"type": "symbol_mismatch" | "chain_mismatch" |
+  "symbol_unverified" | "address_not_listed", "message": "..."}, empty when
+  none. symbol_mismatch: the symbol (given or extracted from free text) is not
+  the contract address's; the address's symbol is analyzed. chain_mismatch:
+  the address has no DexScreener pair on the requested chain; its busiest
+  chain is used. symbol_unverified: DexScreener lists the address, but its
+  listed symbol is not a plain ticker, so a given symbol is used unchecked.
+  address_not_listed: no DexScreener pair has the address as its base token,
+  so nothing about the token is verified.
 - degraded_sources: sources that failed while the request still produced a
   result: "x" (all X search slices), "x_partial" (some slices), "x_counts",
   "news", "dexscreener".
@@ -77,6 +87,9 @@ from pydantic import BaseModel, Field
 
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
 ErrorType = Literal["invalid_input", "source_unavailable", "llm_error", "internal"]
+WarningType = Literal[
+    "symbol_mismatch", "chain_mismatch", "symbol_unverified", "address_not_listed"
+]
 
 ALLOWED_TOOLS = ["token_social_sentiment"]
 DEFAULT_MODEL = "gpt-4.1-2025-04-14"
@@ -209,6 +222,7 @@ OUTPUT_KEYS = (
     "reasoning",
     "top_posts",
     "headlines",
+    "warnings",
     "degraded_sources",
     "error",
 )
@@ -306,6 +320,17 @@ def _api_key(api_keys: Any, name: str) -> Optional[str]:
     except (IndexError, KeyError, TypeError):
         # a KeyChain service configured with an empty key list
         return None
+
+
+def _warn(run_state: Dict[str, Any], warning_type: WarningType, message: str) -> None:
+    """Record a warning in the output and as a note in reasoning.
+
+    :param run_state: shared "notes" and "warnings" lists.
+    :param warning_type: warning category.
+    :param message: human-readable detail.
+    """
+    run_state["notes"].append(message)
+    run_state["warnings"].append({"type": warning_type, "message": message})
 
 
 def _empty_result(window_seconds: int) -> Dict[str, Any]:
@@ -459,10 +484,14 @@ def _pair_volume(pair: Dict[str, Any]) -> float:
         return 0.0
 
 
-def resolve_token(address: str) -> Optional[Dict[str, Any]]:
+def resolve_token(
+    address: str, chain: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """Look up symbol, chain and 24h volume for a contract address.
 
     :param address: token contract address.
+    :param chain: requested chain; when the address has pairs on it, only
+        those pairs are used (the same address can exist on several chains).
     :return: {"symbol", "chain", "volume", "fdv", "stock"} ({} if not
         listed), or None if the lookup failed. "stock" is True when the token
         uses the Robinhood Chain tokenized-stock naming.
@@ -477,6 +506,8 @@ def resolve_token(address: str) -> Optional[Dict[str, Any]]:
     ]
     if not own:
         return {}
+    on_chain = [p for p in own if str(p.get("chainId") or "").strip().lower() == chain]
+    own = on_chain or own
     # listings may carry "$FUN" or odd characters; only a clean ticker is
     # safe to use in the X query
     base = own[0].get("baseToken") or {}
@@ -1077,7 +1108,8 @@ def _resolve_target(
     :param client: OpenAI client.
     :param model: model name.
     :param counter_callback: mech token counter.
-    :param run_state: shared "notes", "llm_notes" and "degraded" lists.
+    :param run_state: shared "notes", "llm_notes", "degraded" and "warnings"
+        lists.
     :return: target dict with symbol, address, chain, narrow, stock.
     """
     notes, llm_notes, degraded = (
@@ -1105,7 +1137,7 @@ def _resolve_target(
     token_lookup_failed = False
     stock = False
     if address:
-        info = resolve_token(address)
+        info = resolve_token(address, chain)
         if info is None:
             token_lookup_failed = True
             degraded.append("dexscreener")
@@ -1113,17 +1145,35 @@ def _resolve_target(
                 "Token lookup failed; symbol/address match and ticker sharing not "
                 "checked."
             )
-        elif info:
+        elif not info:
+            _warn(
+                run_state,
+                "address_not_listed",
+                "Contract address not found as a traded token on DexScreener; token "
+                "details not verified.",
+            )
+        else:
             if info["symbol"] and symbol and info["symbol"] != symbol:
-                notes.append(
-                    f"Requested symbol {symbol} does not match the contract address "
-                    f"(address belongs to {info['symbol']}); analyzed {info['symbol']}."
+                _warn(
+                    run_state,
+                    "symbol_mismatch",
+                    f"Symbol {symbol} does not match the contract address "
+                    f"(address belongs to {info['symbol']}); analyzed {info['symbol']}.",
+                )
+            elif not info["symbol"] and symbol:
+                _warn(
+                    run_state,
+                    "symbol_unverified",
+                    f"The contract address is listed without a plain ticker; symbol "
+                    f"{symbol} not verified.",
                 )
             symbol = info["symbol"] or symbol
             if info["chain"] and chain and info["chain"] != chain:
-                notes.append(
+                _warn(
+                    run_state,
+                    "chain_mismatch",
                     f"Requested chain {chain} does not match the contract address "
-                    f"(listed on {info['chain']}); used {info['chain']}."
+                    f"(listed on {info['chain']}); used {info['chain']}.",
                 )
             chain = info["chain"] or chain
             own_volume, own_fdv = info["volume"], info["fdv"]
@@ -1308,9 +1358,11 @@ def analyze(
         "notes": [],
         "llm_notes": [],
         "degraded": [],
+        "warnings": [],
         "cost": 0.0,
     }
     result["degraded_sources"] = run_state["degraded"]
+    result["warnings"] = run_state["warnings"]
     target = _resolve_target(parsed, client, model, counter_callback, run_state)
     result["token"] = target["symbol"]
     result["address"] = target["address"]
@@ -1390,7 +1442,7 @@ def analyze(
 def _error_result(
     result: Dict[str, Any], error_type: ErrorType, message: str
 ) -> Dict[str, Any]:
-    """Build the error output, keeping the window and degraded sources.
+    """Build the error output, keeping the window, warnings and degraded sources.
 
     :param result: partially filled output.
     :param error_type: error category.
@@ -1399,6 +1451,7 @@ def _error_result(
     """
     error_result = _empty_result(result["window_seconds"])
     error_result["degraded_sources"] = result.get("degraded_sources") or []
+    error_result["warnings"] = result.get("warnings") or []
     error_result["error"] = {"type": error_type, "message": message}
     return error_result
 

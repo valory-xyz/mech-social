@@ -43,6 +43,7 @@ defaults:
                   "https://x.com/i/web/status/1000000000000000005"
                 ],
                 "headlines": [{"title": "ABC lists on a new exchange", "url": "https://example.com/abc"}],
+                "warnings": [],
                 "degraded_sources": [],
                 "error": null
               }
