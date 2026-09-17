@@ -96,3 +96,30 @@ def test_stale_result_example_fails() -> None:
         generate_metadata.build_tools_metadata(
             [entry], registry, generate_metadata.METADATA_TEMPLATE, []
         )
+
+
+def test_missing_output_keys_is_reported(capsys: Any) -> None:
+    """A tool without OUTPUT_KEYS is published, and the skipped check is printed."""
+    schemas: Dict[str, Any] = {"input": {}, "output": {}}
+    registry = {"defaults": {"kind": schemas}, "tool_kinds": {"new": "kind"}}
+    entry = {"tool_name": "new_tool", "description": "", "allowed_tools": ["new"]}
+    metadata = generate_metadata.build_tools_metadata(
+        [entry], registry, generate_metadata.METADATA_TEMPLATE, []
+    )
+    assert metadata["tools"] == ["new"]
+    assert "has no OUTPUT_KEYS" in capsys.readouterr().out
+
+
+def test_output_keys_must_be_strings(tmp_path: Path) -> None:
+    """OUTPUT_KEYS that is not a list or tuple of strings fails like ALLOWED_TOOLS."""
+    tool_dir = tmp_path / "bad_tool"
+    tool_dir.mkdir()
+    (tool_dir / "component.yaml").write_text(
+        "name: bad_tool\nauthor: valory\ndescription: x\nentry_point: bad_tool.py\n",
+        encoding="utf-8",
+    )
+    (tool_dir / "bad_tool.py").write_text(
+        'ALLOWED_TOOLS = ["bad"]\nOUTPUT_KEYS = "token"\n', encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="must be a list or tuple of strings"):
+        generate_metadata.parse_tool_folder(tool_dir)

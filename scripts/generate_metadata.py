@@ -34,6 +34,7 @@ METADATA_FILE_PATH = "metadata.json"
 COMPONENT_YAML = "component.yaml"
 ENTRY_POINT = "entry_point"
 ALLOWED_TOOLS = "ALLOWED_TOOLS"
+OUTPUT_KEYS = "OUTPUT_KEYS"
 SCHEMA_REGISTRY_PATH = Path(__file__).parent / "tool_schemas.yaml"
 # Every Valory operated mech must identify the Mech Terms in its metadata.
 TERMS_URL = "https://www.valory.xyz/terms/mechs"
@@ -80,11 +81,17 @@ def parse_tool_folder(sub: Path) -> Optional[Dict[str, Any]]:
     tools = getattr(module, ALLOWED_TOOLS, None)
     if not isinstance(tools, list) or not tools:
         raise ValueError(f"{py_path} does not define a non-empty {ALLOWED_TOOLS}")
+    output_keys = getattr(module, OUTPUT_KEYS, None)
+    if output_keys is not None and not (
+        isinstance(output_keys, (list, tuple))
+        and all(isinstance(key, str) for key in list(output_keys))
+    ):
+        raise ValueError(f"{py_path} {OUTPUT_KEYS} must be a list or tuple of strings")
     return {
         "tool_name": data["name"],
         "description": data["description"],
         "allowed_tools": tools,
-        "output_keys": getattr(module, "OUTPUT_KEYS", None),
+        "output_keys": output_keys,
     }
 
 
@@ -122,12 +129,13 @@ def load_schema_registry(path: Path) -> Dict[str, Any]:
 def check_example_keys(tool: str, schemas: Dict[str, Any], output_keys: Any) -> None:
     """Fail when a published result example does not list the tool's output keys."""
     if not output_keys:
+        print(f"'{tool}' has no {OUTPUT_KEYS}: its result example is not checked")
         return
     properties = (schemas["output"].get("schema") or {}).get("properties") or {}
     example = (properties.get("result") or {}).get("example")
     if example is not None and list(json.loads(example)) != list(output_keys):
         raise ValueError(
-            f"'{tool}': the result example keys do not match the tool's OUTPUT_KEYS"
+            f"'{tool}': the result example keys do not match the tool's {OUTPUT_KEYS}"
         )
 
 

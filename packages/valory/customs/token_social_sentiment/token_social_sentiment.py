@@ -78,7 +78,17 @@ import json
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Set,
+    Tuple,
+    TypedDict,
+)
 
 import openai
 import requests
@@ -123,13 +133,21 @@ PROMO_RE = re.compile(
     r"|\btelegram (?:is here|is live)\b",
     re.IGNORECASE,
 )
-# a vote is promotion only next to a listing-campaign cue, so governance votes
-# ("cast your vote on Snapshot", "vote on the fee switch") are kept
+# a vote is promotion when it is a campaign call ("vote for $PEPE", "vote
+# here") or sits next to a listing or ranking cue; posts with governance words
+# ("cast your vote on Snapshot", "governance vote to add a listing") are kept
 VOTE_RE = re.compile(r"\bvot(?:e|es|ed|ing)\b", re.IGNORECASE)
-CAMPAIGN_CUE_RE = re.compile(
-    r"listing|leaderboard|dashboard|\bca\s*:|top 100|link below|support ?= ?vote"
-    r"|if you['\u2019]?re (?:in|early)",
+VOTE_CALL_RE = re.compile(
+    r"\bvote for (?:\$|us\b|me\b)|\bevery vote\b|\bvote (?:here|now)\b",
     re.IGNORECASE,
+)
+CAMPAIGN_CUE_RE = re.compile(
+    r"\blisting\b|\bleaderboard\b|\bca\s*:|\blink below\b|\bsupport ?= ?vote\b"
+    r"|\b(?:cmc|coinmarketcap|coingecko)\b",
+    re.IGNORECASE,
+)
+GOVERNANCE_RE = re.compile(
+    r"\b(?:governance|proposals?|snapshot|dao|quorum|tally)\b", re.IGNORECASE
 )
 # posts with fewer real words than this (after removing handles, tags and
 # addresses) carry no opinion, e.g. "robinhood:0x39db..." or "@user $PONS";
@@ -238,6 +256,17 @@ OUTPUT_KEYS = (
 )
 
 
+class RunState(TypedDict):
+    """Notes, sources and counters shared by the steps of one request."""
+
+    notes: List[str]
+    llm_notes: List[str]
+    degraded: List[str]
+    warnings: List[Dict[str, str]]
+    cost: float
+    dropped_posts: int
+
+
 class ToolError(Exception):
     """An error reported to the requester in the `error` field."""
 
@@ -332,7 +361,7 @@ def _api_key(api_keys: Any, name: str) -> Optional[str]:
         return None
 
 
-def _warn(run_state: Dict[str, Any], warning_type: WarningType, message: str) -> None:
+def _warn(run_state: RunState, warning_type: WarningType, message: str) -> None:
     """Record a warning in the output and as a note in reasoning.
 
     :param run_state: shared "notes" and "warnings" lists.
@@ -520,15 +549,17 @@ def resolve_token(
     symbol = str(base.get("symbol", "")).strip().lstrip("$").upper()
     top = max(own, key=_pair_volume)
     chain = str(top.get("chainId") or "").strip().lower()
+    # FDV of the busiest pair that reports one: a dust pool with a wrong USD
+    # price can inflate FDV, and some pairs omit it
+    with_fdv = [p for p in own if _pair_number(p, "fdv")]
     return {
         "symbol": symbol if SYMBOL_RE.fullmatch(symbol) else None,
         # same check as a requested chain: it goes into the X query and prompt
         "chain": chain if CHAIN_RE.match(chain) else None,
         "volume": sum(_pair_volume(p) for p in own),
-        # the busiest pair: a side pair with a wrong USD price can inflate FDV;
-        # other pairs only when the busiest one reports none
-        "fdv": _pair_number(top, "fdv")
-        or max((_pair_number(p, "fdv") for p in own), default=0.0),
+        "fdv": (
+            _pair_number(max(with_fdv, key=_pair_volume), "fdv") if with_fdv else 0.0
+        ),
         "stock": _is_stock_pair(top),
     }
 
@@ -781,7 +812,11 @@ def is_promo(text: str, address: Optional[str]) -> bool:
         return True
     if BASE58_ADDRESS_RE.search(stripped):
         return True
-    if VOTE_RE.search(text) and CAMPAIGN_CUE_RE.search(text):
+    if (
+        VOTE_RE.search(text)
+        and not GOVERNANCE_RE.search(text)
+        and (VOTE_CALL_RE.search(text) or CAMPAIGN_CUE_RE.search(text))
+    ):
         return True
     return bool(PROMO_RE.search(text))
 
@@ -1111,7 +1146,7 @@ def _resolve_target(
     client: OpenAI,
     model: str,
     counter_callback: Optional[Callable[..., Any]],
-    run_state: Dict[str, Any],
+    run_state: RunState,
 ) -> Dict[str, Any]:
     """Resolve symbol, address, chain and ticker checks for the request.
 
@@ -1264,7 +1299,7 @@ def _fetch_items(
     target: Dict[str, Any],
     api_keys: Any,
     window_seconds: int,
-    run_state: Dict[str, Any],
+    run_state: RunState,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]], Optional[int]]:
     """Fetch X posts and news headlines for the target.
 
@@ -1366,7 +1401,7 @@ def analyze(
         api_key=openai_key, timeout=LLM_TIMEOUT, max_retries=LLM_MAX_RETRIES
     )
 
-    run_state: Dict[str, Any] = {
+    run_state: RunState = {
         "notes": [],
         "llm_notes": [],
         "degraded": [],

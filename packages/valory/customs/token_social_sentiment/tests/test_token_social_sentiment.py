@@ -72,7 +72,7 @@ def _labels(
     )
 
 
-def _run(prompt: str, keys: Optional[Dict[str, str]] = None, **kwargs: Any) -> Dict:
+def _run(prompt: str, keys: Any = None, **kwargs: Any) -> Dict:
     """Run the tool and decode its JSON result."""
     response = tool.run(
         tool="token_social_sentiment",
@@ -907,6 +907,13 @@ def test_is_ambiguous_ticker(volumes: Any, expected: bool) -> None:
         ("Governance vote now open on Tally for the $ENS endowment", False),
         ("Telegram group chats now support TON payments", False),
         ("Let\u2019s vote! $FLOKI listing", True),
+        ("$ARB governance dashboard shows the vote passed", False),
+        ("Governance vote to add $wstETH listing on Aave v3 passed", False),
+        ("Aave governance votes on delisting $CRV collateral", False),
+        ("Holders vote to fight the delisting of $XYZ", False),
+        ("Vote for $PEPE on CMC", True),
+        ("$XYZ needs your votes! Vote here: bit.ly/xyz", True),
+        ("Let\u2019s vote for $FLOKI fam", True),
         ("I voted yes on the $CAKE emissions proposal", False),
         ("Join our official Telegram for $PEPE signals", True),
         (
@@ -1374,7 +1381,7 @@ def test_service_with_empty_key_list(
     """An empty key list never raises: sources degrade, no openai key is internal."""
     services = {"openai": ["sk"], "serperapi": ["s"], "x_bearer": ["x"]}
     services[service] = []
-    result = _run(PEPE_PROMPT, keys=_EmptyKeyChain(services))  # type: ignore[arg-type]
+    result = _run(PEPE_PROMPT, keys=_EmptyKeyChain(services))
     assert result["error"] == error
     assert result["degraded_sources"] == degraded
 
@@ -1620,13 +1627,14 @@ def test_all_posts_dropped_is_noted_when_news_is_scored(
     assert "All 3 X posts in the sample were dropped" in result["reasoning"]
 
 
-def test_resolve_token_fdv_falls_back_when_busiest_pair_has_none(
+def test_resolve_token_fdv_from_busiest_pair_that_reports_one(
     monkeypatch: Any,
 ) -> None:
-    """A busy pool without FDV does not zero the FDV reported by other pairs."""
+    """A busy pool without FDV falls back to the next busiest pair, not the largest."""
     pairs = [
         _pair("FUN", ADDRESS, 900),
         {**_pair("FUN", ADDRESS, 10), "fdv": 5e6},
+        {**_pair("FUN", ADDRESS, 1), "fdv": 9e9},
     ]
     monkeypatch.setattr(
         tool.requests, "get", MagicMock(return_value=_dex_response(pairs))
