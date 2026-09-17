@@ -78,7 +78,17 @@ import json
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Set,
+    Tuple,
+    TypedDict,
+)
 
 import openai
 import requests
@@ -115,20 +125,13 @@ X_END_TIME_MARGIN_SECONDS = 30
 MAX_CASHTAGS_PER_POST = 4
 # promotion markers; a post with any of them is dropped before the LLM. Group
 # invites are matched as phrases, so posts about Telegram itself (TON, NOT)
-# are kept
+# are kept. Vote and listing campaigns are left to the scoring call, which
+# tells them apart from governance votes and labels them off_topic
 PROMO_RE = re.compile(
     r"t\.me/|\b(?:whatsapp|airdrop|giveaway|dm me|nominat\w*)\b"
     r"|\bdon['\u2019]?t miss\b"
     r"|\b(?:join|official)\b[^.!?\n]{0,20}\btelegram\b"
     r"|\btelegram (?:is here|is live)\b",
-    re.IGNORECASE,
-)
-# a vote is promotion only next to a listing-campaign cue, so governance votes
-# ("cast your vote on Snapshot", "vote on the fee switch") are kept
-VOTE_RE = re.compile(r"\bvot(?:e|es|ed|ing)\b", re.IGNORECASE)
-CAMPAIGN_CUE_RE = re.compile(
-    r"listing|leaderboard|dashboard|\bca\s*:|top 100|link below|support ?= ?vote"
-    r"|if you['\u2019]?re (?:in|early)",
     re.IGNORECASE,
 )
 # posts with fewer real words than this (after removing handles, tags and
@@ -238,6 +241,17 @@ OUTPUT_KEYS = (
 )
 
 
+class RunState(TypedDict):
+    """Notes, sources and counters shared by the steps of one request."""
+
+    notes: List[str]
+    llm_notes: List[str]
+    degraded: List[str]
+    warnings: List[Dict[str, str]]
+    cost: float
+    dropped_posts: int
+
+
 class ToolError(Exception):
     """An error reported to the requester in the `error` field."""
 
@@ -332,7 +346,7 @@ def _api_key(api_keys: Any, name: str) -> Optional[str]:
         return None
 
 
-def _warn(run_state: Dict[str, Any], warning_type: WarningType, message: str) -> None:
+def _warn(run_state: RunState, warning_type: WarningType, message: str) -> None:
     """Record a warning in the output and as a note in reasoning.
 
     :param run_state: shared "notes" and "warnings" lists.
@@ -520,15 +534,17 @@ def resolve_token(
     symbol = str(base.get("symbol", "")).strip().lstrip("$").upper()
     top = max(own, key=_pair_volume)
     chain = str(top.get("chainId") or "").strip().lower()
+    # FDV of the busiest pair that reports one: a dust pool with a wrong USD
+    # price can inflate FDV, and some pairs omit it
+    with_fdv = [p for p in own if _pair_number(p, "fdv")]
     return {
         "symbol": symbol if SYMBOL_RE.fullmatch(symbol) else None,
         # same check as a requested chain: it goes into the X query and prompt
         "chain": chain if CHAIN_RE.match(chain) else None,
         "volume": sum(_pair_volume(p) for p in own),
-        # the busiest pair: a side pair with a wrong USD price can inflate FDV;
-        # other pairs only when the busiest one reports none
-        "fdv": _pair_number(top, "fdv")
-        or max((_pair_number(p, "fdv") for p in own), default=0.0),
+        "fdv": (
+            _pair_number(max(with_fdv, key=_pair_volume), "fdv") if with_fdv else 0.0
+        ),
         "stock": _is_stock_pair(top),
     }
 
@@ -768,8 +784,8 @@ def is_promo(text: str, address: Optional[str]) -> bool:
     """Tell whether a post is promotion rather than an opinion.
 
     Drops posts that carry a contract address other than the target's (shills
-    for other tokens, copycats), posts with group, giveaway or nomination
-    markers, and listing-vote campaigns.
+    for other tokens, copycats) and posts with group, giveaway or nomination
+    markers.
 
     :param text: post text.
     :param address: target contract address, if known.
@@ -780,8 +796,6 @@ def is_promo(text: str, address: Optional[str]) -> bool:
     if any(a.lower() != target for a in ADDRESS_RE.findall(stripped)):
         return True
     if BASE58_ADDRESS_RE.search(stripped):
-        return True
-    if VOTE_RE.search(text) and CAMPAIGN_CUE_RE.search(text):
         return True
     return bool(PROMO_RE.search(text))
 
@@ -1111,7 +1125,7 @@ def _resolve_target(
     client: OpenAI,
     model: str,
     counter_callback: Optional[Callable[..., Any]],
-    run_state: Dict[str, Any],
+    run_state: RunState,
 ) -> Dict[str, Any]:
     """Resolve symbol, address, chain and ticker checks for the request.
 
@@ -1264,7 +1278,7 @@ def _fetch_items(
     target: Dict[str, Any],
     api_keys: Any,
     window_seconds: int,
-    run_state: Dict[str, Any],
+    run_state: RunState,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]], Optional[int]]:
     """Fetch X posts and news headlines for the target.
 
@@ -1366,7 +1380,7 @@ def analyze(
         api_key=openai_key, timeout=LLM_TIMEOUT, max_retries=LLM_MAX_RETRIES
     )
 
-    run_state: Dict[str, Any] = {
+    run_state: RunState = {
         "notes": [],
         "llm_notes": [],
         "degraded": [],

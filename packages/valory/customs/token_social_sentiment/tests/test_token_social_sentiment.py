@@ -72,7 +72,7 @@ def _labels(
     )
 
 
-def _run(prompt: str, keys: Optional[Dict[str, str]] = None, **kwargs: Any) -> Dict:
+def _run(prompt: str, keys: Any = None, **kwargs: Any) -> Dict:
     """Run the tool and decode its JSON result."""
     response = tool.run(
         tool="token_social_sentiment",
@@ -891,32 +891,18 @@ def test_is_ambiguous_ticker(volumes: Any, expected: bool) -> None:
         ("PEPE AIRDROP live", True),
         ("thoughts on pepe? https://t.co/abc", False),
         ("bought more $PEPE, tx 0x" + "ab" * 32, False),
-        ("spotted $PEPE in the listing feed, cast your vote", True),
         ("@GoPlusSecurity I nominate $PEPE #DeepScanAudit", True),
         ("$PEPE Telegram is live", True),
         ("Don't miss $PEPE", True),
         ("Don\u2019t miss $PEPE", True),
         ("devoted $PEPE holder since launch", False),
         ("Telegram now uses $TON for all mini-app payments", False),
-        ("Uniswap fee switch vote passes, $UNI up 20%", False),
-        ("Snapshot vote for AIP-12 is live $AAVE", False),
-        ("Cast your vote on Snapshot for AIP-420 before Friday", False),
-        ("Time to vote on the Uniswap fee switch", False),
-        ("Final vote counts: 90% yes on the $AAVE proposal", False),
-        ("The $AAVE governance vote nowhere close to quorum", False),
-        ("Governance vote now open on Tally for the $ENS endowment", False),
         ("Telegram group chats now support TON payments", False),
-        ("Let\u2019s vote! $FLOKI listing", True),
-        ("I voted yes on the $CAKE emissions proposal", False),
         ("Join our official Telegram for $PEPE signals", True),
-        (
-            "Attention $INU Family! YOUR vote matters! Less than 100 votes are "
-            "needed to list $INU on the Robinhood Top 100 Leaderboard.",
-            True,
-        ),
-        ("Attention $INU Family! YOUR vote matters!", False),
-        ("$DPONS just landed CA: [CA] Support = vote", True),
-        ("Vote for $PONS on the listing poll", True),
+        # vote campaigns and governance votes both reach the scoring call,
+        # which labels campaigns off_topic
+        ("Vote for $PEPE on CMC", False),
+        ("Cast your vote on Snapshot for AIP-420 before Friday", False),
     ],
 )
 def test_is_promo(text: str, expected: bool) -> None:
@@ -1374,7 +1360,7 @@ def test_service_with_empty_key_list(
     """An empty key list never raises: sources degrade, no openai key is internal."""
     services = {"openai": ["sk"], "serperapi": ["s"], "x_bearer": ["x"]}
     services[service] = []
-    result = _run(PEPE_PROMPT, keys=_EmptyKeyChain(services))  # type: ignore[arg-type]
+    result = _run(PEPE_PROMPT, keys=_EmptyKeyChain(services))
     assert result["error"] == error
     assert result["degraded_sources"] == degraded
 
@@ -1620,13 +1606,14 @@ def test_all_posts_dropped_is_noted_when_news_is_scored(
     assert "All 3 X posts in the sample were dropped" in result["reasoning"]
 
 
-def test_resolve_token_fdv_falls_back_when_busiest_pair_has_none(
+def test_resolve_token_fdv_from_busiest_pair_that_reports_one(
     monkeypatch: Any,
 ) -> None:
-    """A busy pool without FDV does not zero the FDV reported by other pairs."""
+    """A busy pool without FDV falls back to the next busiest pair, not the largest."""
     pairs = [
         _pair("FUN", ADDRESS, 900),
         {**_pair("FUN", ADDRESS, 10), "fdv": 5e6},
+        {**_pair("FUN", ADDRESS, 1), "fdv": 9e9},
     ]
     monkeypatch.setattr(
         tool.requests, "get", MagicMock(return_value=_dex_response(pairs))
