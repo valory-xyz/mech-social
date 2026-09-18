@@ -54,8 +54,9 @@ Output (JSON string, always all keys):
   X_QUERY_EXCLUSIONS, so it is lower than a bare cashtag count.
 - mentions_trend: {"recent": n, "previous": m}, matching posts in the newer
   half of the window and in the older half. Null when the count is
-  unavailable, and for windows under MIN_TREND_BUCKETS hours, which the
-  hourly counts cannot split.
+  unavailable, for windows under MIN_TREND_HOURS, and when the hourly buckets
+  cover less than MIN_TREND_COVERAGE of the window (then "x_trend" is a
+  degraded source).
 - posts_analyzed: X posts in the sample that are about the token (the
   sample is at most 40 posts spread over the window).
 - headlines: news headlines in the sample that are about the token.
@@ -75,7 +76,8 @@ Output (JSON string, always all keys):
   so nothing about the token is verified.
 - degraded_sources: sources that failed while the request still produced a
   result: "x" (all X search slices), "x_partial" (some slices), "x_counts",
-  "news", "dexscreener".
+  "x_trend" (the count arrived without usable hourly buckets), "news",
+  "dexscreener".
 - error: null, or {"type": "invalid_input" | "source_unavailable" |
   "llm_error" | "internal", "message": "..."}; data fields are null then.
 """
@@ -181,15 +183,17 @@ SERPER_QUERY_USD = 0.001
 LLM_TIMEOUT = 30
 LLM_MAX_RETRIES = 1
 
-# Bot templates excluded in the query itself. In the blind-labelled samples
-# only 4% of the posts carrying "CA:" are on-topic, and dropping them at the
-# source leaves the 40-post budget for real posts: on-topic items went from 8
-# to 22 (ORBIO), 11 to 25 (QUBIT), 2 to 4 (OPTIMUS), unchanged for ENA.
+# Bot templates excluded in the query itself, so that the 40 posts a request
+# reads are not filled by a shill wave. X drops punctuation inside a quoted
+# phrase, so "CA:" matches the word "ca" (checked with counts: "CA:", "CA" and
+# ca return the same total); in the blind-labelled samples that word carries
+# 6% of the on-topic posts, against 34% of all posts.
 X_QUERY_EXCLUSIONS = '-"watch update" -"detect paid" -"CA:"'
 
-# hourly counts split into halves need enough buckets for the split to mean
-# something: with one or two, a bucket that straddles the middle decides it
-MIN_TREND_BUCKETS = 4
+# a trend needs a window long enough that clock-hour buckets can be split
+MIN_TREND_HOURS = 4
+# and enough of that window covered by usable buckets
+MIN_TREND_COVERAGE = 0.75
 
 X_SEARCH_URL = "https://api.x.com/2/tweets/search/recent"
 X_COUNTS_URL = "https://api.x.com/2/tweets/counts/recent"
@@ -267,6 +271,13 @@ OUTPUT_KEYS = (
     "degraded_sources",
     "error",
 )
+
+
+class MentionsTrend(TypedDict):
+    """Matching posts in the newer and the older half of the window."""
+
+    recent: int
+    previous: int
 
 
 class RunState(TypedDict):
@@ -713,7 +724,7 @@ def _dedupe_key(text: str) -> str:
 def fetch_x_posts(
     bearer: str, query: str, start_time: datetime, end_time: datetime
 ) -> Tuple[
-    List[Dict[str, Any]], Optional[int], Optional[Dict[str, int]], List[str], float
+    List[Dict[str, Any]], Optional[int], Optional[MentionsTrend], List[str], float
 ]:
     """Fetch X posts spread over the window, the post count and its trend.
 
@@ -725,7 +736,7 @@ def fetch_x_posts(
     :param end_time: window end.
     :return: (posts as {id, text, engagement}, total mentions or None,
         {"recent", "previous"} matching posts per half of the window or None,
-        degraded sources among "x_partial" and "x_counts", cost in USD of the
+        degraded sources among "x_partial", "x_counts" and "x_trend", cost in USD of the
         posts read and the counts request).
     """
     headers = {"Authorization": f"Bearer {bearer}"}
@@ -814,32 +825,79 @@ def fetch_x_posts(
         print(f"[token_social_sentiment] X counts unavailable: {e}")
     if mentions is None:
         degraded.append("x_counts")
+    elif trend is None and end_time - start_time >= timedelta(hours=MIN_TREND_HOURS):
+        # the count arrived but its buckets did not: say so instead of leaving
+        # a null that reads like "the window was too short"
+        degraded.append("x_trend")
     return posts, mentions, trend, degraded, cost
+
+
+def _bucket_span(
+    bucket: Dict[str, Any], start_time: datetime, end_time: datetime
+) -> Optional[Tuple[datetime, datetime, int, float]]:
+    """Read one counts bucket, clipped to the window.
+
+    :param bucket: one entry of the counts "data" list.
+    :param start_time: window start.
+    :param end_time: window end.
+    :return: (start, end, count, bucket length in seconds) with start and end
+        clipped to the window, or None when the bucket is unusable or falls
+        outside it. The length is the bucket's own, so a clipped bucket only
+        contributes the share of its count that falls inside the window.
+    """
+    try:
+        opens = datetime.fromisoformat(str(bucket["start"]).replace("Z", "+00:00"))
+        closes = (
+            datetime.fromisoformat(str(bucket["end"]).replace("Z", "+00:00"))
+            if bucket.get("end")
+            else opens + timedelta(hours=1)
+        )
+        count = int(bucket["tweet_count"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    length = (closes - opens).total_seconds()
+    opens, closes = max(opens, start_time), min(closes, end_time)
+    return (opens, closes, count, length) if closes > opens and length > 0 else None
 
 
 def _mentions_trend(
     buckets: Any, start_time: datetime, end_time: datetime
-) -> Optional[Dict[str, int]]:
+) -> Optional[MentionsTrend]:
     """Split the hourly counts into the newer and the older half of the window.
+
+    X aligns buckets to the clock hour while the window does not, so a bucket
+    is shared between the halves in proportion to its overlap with each, and a
+    bucket that cannot be read is skipped rather than discarding the rest.
 
     :param buckets: the "data" list of the X counts response.
     :param start_time: window start.
     :param end_time: window end.
-    :return: {"recent", "previous"}, or None when the buckets are unusable or
-        too few to split.
+    :return: {"recent", "previous"}, or None for a window under
+        MIN_TREND_HOURS and when the usable buckets cover less than
+        MIN_TREND_COVERAGE of it.
     """
-    if not isinstance(buckets, list) or len(buckets) < MIN_TREND_BUCKETS:
+    window = end_time - start_time
+    if not isinstance(buckets, list) or window < timedelta(hours=MIN_TREND_HOURS):
         return None
-    middle = start_time + (end_time - start_time) / 2
-    halves = {"recent": 0, "previous": 0}
+    middle = start_time + window / 2
+    recent = previous = covered = 0.0
     for bucket in buckets:
-        try:
-            when = datetime.fromisoformat(str(bucket["start"]).replace("Z", "+00:00"))
-            count = int(bucket["tweet_count"])
-        except (KeyError, TypeError, ValueError):
-            return None
-        halves["recent" if when >= middle else "previous"] += count
-    return halves
+        span = (
+            _bucket_span(bucket, start_time, end_time)
+            if isinstance(bucket, dict)
+            else None
+        )
+        if span is None:
+            continue
+        opens, closes, count, length = span
+        inside = (closes - opens).total_seconds()
+        in_recent = max(0.0, (closes - max(opens, middle)).total_seconds())
+        recent += count * in_recent / length
+        previous += count * (inside - in_recent) / length
+        covered += inside
+    if covered < MIN_TREND_COVERAGE * window.total_seconds():
+        return None
+    return {"recent": round(recent), "previous": round(previous)}
 
 
 def is_promo(text: str, address: Optional[str]) -> bool:
@@ -1350,7 +1408,7 @@ def _fetch_items(
     List[Dict[str, Any]],
     List[Dict[str, str]],
     Optional[int],
-    Optional[Dict[str, int]],
+    Optional[MentionsTrend],
 ]:
     """Fetch X posts and news headlines for the target.
 
@@ -1415,6 +1473,8 @@ def _fetch_items(
         notes.append("Some X time slices failed; the sample leans to the others.")
     if "x_counts" in degraded:
         notes.append("X post count unavailable.")
+    if "x_trend" in degraded:
+        notes.append("X post count has no usable hourly buckets; no trend.")
     if "news" in degraded:
         notes.append("news unavailable.")
     kept = drop_waves(

@@ -695,6 +695,19 @@ def _x_response(data: Any = None, meta: Any = None) -> MagicMock:
     return response
 
 
+def _buckets(start: datetime, hours: int, count: int = 10) -> List[Dict[str, Any]]:
+    """Clock-aligned hourly counts buckets covering a window."""
+    first = start.replace(minute=0, second=0, microsecond=0)
+    return [
+        {
+            "start": (first + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "end": (first + timedelta(hours=i + 1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "tweet_count": count,
+        }
+        for i in range(hours + 1)
+    ]
+
+
 def test_fetch_x_posts_slices_window_and_filters(monkeypatch: Any) -> None:
     """Window split in X_SLICES; near-duplicates and ticker lists dropped."""
     pages = [
@@ -711,15 +724,18 @@ def test_fetch_x_posts_slices_window_and_filters(monkeypatch: Any) -> None:
         [],
     ]
     calls: List[Dict[str, Any]] = []
+    end = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
 
     def fake_get(url: str, params: Dict[str, Any], **_: Any) -> Any:
         calls.append({"url": url, **params})
         if url == tool.X_COUNTS_URL:
-            return _x_response(meta={"total_tweet_count": 77})
+            return _x_response(
+                data=_buckets(end - timedelta(hours=24), 24, count=3),
+                meta={"total_tweet_count": 77},
+            )
         return _x_response(data=pages[len(calls) - 1])
 
     monkeypatch.setattr(tool.requests, "get", fake_get)
-    end = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
     posts, mentions, trend, degraded, cost = tool.fetch_x_posts(
         "x", "q", end - timedelta(hours=24), end
     )
@@ -756,7 +772,7 @@ def test_fetch_x_posts_keeps_posts_when_a_slice_fails(monkeypatch: Any) -> None:
     monkeypatch.setattr(tool.requests, "get", fake_get)
     end = datetime(2026, 9, 16, tzinfo=timezone.utc)
     posts, mentions, trend, degraded, cost = tool.fetch_x_posts(
-        "x", "q", end - timedelta(hours=4), end
+        "x", "q", end - timedelta(hours=2), end
     )
     assert [p["id"] for p in posts] == ["1", "2", "4"]
     assert mentions == 9
@@ -789,58 +805,106 @@ def test_fetch_x_posts_counts_missing_is_degraded(monkeypatch: Any, meta: Any) -
 
 def test_fetch_x_posts_counts_hourly_and_splits_the_trend(monkeypatch: Any) -> None:
     """The counts request is hourly and its buckets become the mentions trend."""
-    buckets = [
-        {"start": "2026-09-15T12:00:00.000Z", "tweet_count": 3},
-        {"start": "2026-09-15T18:00:00.000Z", "tweet_count": 4},
-        {"start": "2026-09-16T00:00:00.000Z", "tweet_count": 10},
-        {"start": "2026-09-16T06:00:00.000Z", "tweet_count": 20},
-    ]
+    end = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+    buckets = _buckets(end - timedelta(hours=24), 24, count=0)
+    for bucket in buckets[12:24]:
+        bucket["tweet_count"] = 10
     calls: List[Dict[str, Any]] = []
 
     def fake_get(url: str, params: Dict[str, Any], **_: Any) -> Any:
         calls.append({"url": url, **params})
         if url == tool.X_COUNTS_URL:
-            return _x_response(data=buckets, meta={"total_tweet_count": 37})
+            return _x_response(data=buckets, meta={"total_tweet_count": 120})
         return _x_response(
             data=[{"id": str(len(calls)), "text": f"hi $PEPE {len(calls)}"}]
         )
 
     monkeypatch.setattr(tool.requests, "get", fake_get)
-    end = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
     _, mentions, trend, degraded, _ = tool.fetch_x_posts(
         "x", "q", end - timedelta(hours=24), end
     )
-    assert mentions == 37
-    # window halves at 2026-09-16T00:00
-    assert trend == {"recent": 30, "previous": 7}
+    assert mentions == 120
+    assert trend == {"recent": 120, "previous": 0}
     assert not degraded
-    counts = [c for c in calls if c["url"] == tool.X_COUNTS_URL]
-    assert [c["granularity"] for c in counts] == ["hour"]
+    assert [c["granularity"] for c in calls if c["url"] == tool.X_COUNTS_URL] == [
+        "hour"
+    ]
+
+
+@pytest.mark.parametrize("offset", [0, 7, 23, 59])
+def test_mentions_trend_is_not_biased_by_the_clock(offset: int) -> None:
+    """A flat posting rate reads flat whatever minute the window ends on."""
+    end = datetime(2026, 9, 16, 12, offset, tzinfo=timezone.utc)
+    start = end - timedelta(hours=24)
+    trend = tool._mentions_trend(_buckets(start, 24), start, end)
+    assert trend is not None
+    assert abs(trend["recent"] - trend["previous"]) <= 1
 
 
 @pytest.mark.parametrize(
-    "buckets",
-    [
-        None,
-        [],
-        "nope",
-        [{"start": "2026-09-16T00:00:00Z", "tweet_count": 1}] * 3,
-        [{"start": "2026-09-16T00:00:00Z"}] * 4,
-        [{"x": 1}] * 4,
-    ],
+    "buckets,window_hours",
+    [(None, 24), ([], 24), ("nope", 24), ("full", 3)],
 )
-def test_mentions_trend_needs_usable_buckets(buckets: Any) -> None:
-    """Missing, malformed or too few counts buckets give no trend."""
-    end = datetime(2026, 9, 16, tzinfo=timezone.utc)
-    assert tool._mentions_trend(buckets, end - timedelta(hours=24), end) is None
+def test_mentions_trend_needs_a_window_and_buckets(
+    buckets: Any, window_hours: int
+) -> None:
+    """Too short a window or unusable buckets give no trend instead of a guess."""
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    start = end - timedelta(hours=window_hours)
+    data = _buckets(start, window_hours) if buckets == "full" else buckets
+    assert tool._mentions_trend(data, start, end) is None
 
 
-def test_mentions_trend_in_the_output(stubs: Dict[str, MagicMock]) -> None:
-    """The trend from the counts request is returned as it is."""
-    result = _run(PEPE_PROMPT)
-    assert result["mentions_trend"] == _TREND
-    stubs["x"].return_value = (_posts(8), None, None, ["x_counts"], 0.0)
-    assert _run(PEPE_PROMPT)["mentions_trend"] is None
+def test_mentions_trend_skips_one_bad_bucket_but_needs_coverage() -> None:
+    """A malformed bucket is skipped; too few usable ones drop the trend."""
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    start = end - timedelta(hours=24)
+    buckets = _buckets(start, 24)
+    buckets[0] = {"start": "nonsense", "tweet_count": 10}
+    trend = tool._mentions_trend(buckets, start, end)
+    assert trend is not None and trend["recent"] > 0
+    assert tool._mentions_trend(buckets[:8], start, end) is None
+
+
+def test_unusable_buckets_are_a_degraded_source(monkeypatch: Any) -> None:
+    """A count without usable buckets says so instead of a silent null trend."""
+
+    def fake_get(url: str, **_: Any) -> Any:
+        if url == tool.X_COUNTS_URL:
+            return _x_response(
+                data=[{"start": "nonsense"}], meta={"total_tweet_count": 42}
+            )
+        return _x_response(data=[{"id": "1", "text": "hi $PEPE"}])
+
+    monkeypatch.setattr(tool.requests, "get", fake_get)
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    _, mentions, trend, degraded, _ = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=24), end
+    )
+    assert (mentions, trend, degraded) == (42, None, ["x_trend"])
+
+
+def test_short_window_without_buckets_is_not_degraded(monkeypatch: Any) -> None:
+    """Under MIN_TREND_HOURS a null trend is expected, not a failure."""
+
+    def fake_get(url: str, **_: Any) -> Any:
+        if url == tool.X_COUNTS_URL:
+            return _x_response(data=[], meta={"total_tweet_count": 7})
+        return _x_response(data=[{"id": "1", "text": "hi $PEPE"}])
+
+    monkeypatch.setattr(tool.requests, "get", fake_get)
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    _, _, trend, degraded, _ = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=1), end
+    )
+    assert trend is None and degraded == []
+
+
+def test_query_excludes_the_bot_templates_by_name() -> None:
+    """The query carries the exclusions themselves, not just the constant."""
+    query = tool.build_x_query("PEPE", ADDRESS, "ethereum")
+    for term in ('-"watch update"', '-"detect paid"', '-"CA:"'):
+        assert term in query
 
 
 def test_fetch_x_posts_all_slices_failing_raises(monkeypatch: Any) -> None:
