@@ -36,8 +36,10 @@ Input (the request `prompt`, one of):
     the address when not given.
   - window_seconds: integer, default 86400, clamped to 3600..604740.
 - Free text, e.g. "How is sentiment on $PEPE today?". The ticker comes from a
-  $cashtag, otherwise from one LLM extraction call; an address is only used if
-  it is written in the text. Two or more tokens or addresses are rejected.
+  $cashtag, otherwise from one LLM extraction call; without an address the
+  extraction also runs next to a $cashtag, so "$BTC or Ethereum" counts as two
+  tokens. An address is only used if it is written in the text. Two or more
+  tokens or addresses are rejected.
 
 Output (JSON string, always all keys):
 - token, address, chain, window_seconds: what was actually analyzed.
@@ -132,7 +134,9 @@ PROMO_RE = re.compile(
     r"t\.me/|\b(?:whatsapp|airdrop|giveaway|dm me|nominat\w*)\b"
     r"|\bdon['\u2019]?t miss\b"
     r"|\b(?:join|official)\b[^.!?\n]{0,20}\btelegram\b"
-    r"|\btelegram (?:is here|is live)\b",
+    r"|\btelegram (?:is here|is live)\b"
+    # bot templates: DEX ad and listing-watch alerts
+    r"|\bdetect paid\b|\b(?:token|listing) watch update\b",
     re.IGNORECASE,
 )
 # posts with fewer real words than this (after removing handles, tags and
@@ -205,7 +209,14 @@ PR_SOURCES = (
     "ein presswire",
     "newsfile",
 )
-PR_URL_MARKERS = ("/press-release", "/pressreleases/", "marketmediawire", "sponsored")
+PR_URL_MARKERS = (
+    "/press-release",
+    "/pressreleases/",
+    "marketmediawire",
+    "sponsored",
+    # exchange token and price pages, not reporting
+    "mexc.co",
+)
 
 # word boundaries so a 64-hex transaction hash is not read as an address
 ADDRESS_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
@@ -943,7 +954,7 @@ def fetch_headlines(
 
 
 def is_press_release(source: str, url: str) -> bool:
-    """Tell whether a news item is a paid press release or sponsored promo.
+    """Tell whether a news item is a paid press release, promo or exchange page.
 
     :param source: publisher name from Serper.
     :param url: article URL.
@@ -1147,11 +1158,16 @@ def _resolve_target(
     )
     symbol, address = parsed["symbol"], parsed["address"]
     chain = validate_chain(parsed["chain"])
-    if parsed["free_text"] is not None and symbol is None:
+    if parsed["free_text"] is not None and (symbol is None or address is None):
         # the address is only ever taken verbatim from the text (regex): an
-        # LLM asked for one can invent a real-looking address from memory
+        # LLM asked for one can invent a real-looking address from memory.
+        # A cashtag without an address is checked too, so "$BTC or Ethereum"
+        # is not read as a BTC-only request
         extracted = extract_token(client, model, parsed["free_text"], counter_callback)
-        symbols = sorted({sym.lstrip("$").upper() for sym in extracted.symbols if sym})
+        symbols = sorted(
+            {sym.lstrip("$").upper() for sym in extracted.symbols if sym}
+            | ({symbol} if symbol else set())
+        )
         if len(symbols) > 1:
             raise ToolError(
                 "invalid_input",
