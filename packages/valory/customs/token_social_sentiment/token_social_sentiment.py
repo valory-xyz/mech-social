@@ -56,7 +56,8 @@ Output (JSON string, always all keys):
   half of the window and in the older half. Null when the count is
   unavailable, for windows under MIN_TREND_HOURS, and when the hourly buckets
   cover less than MIN_TREND_COVERAGE of either half of the window (then
-  "x_trend" is a degraded source). Zero matching posts give zeros, not null.
+  "x_trend" is a degraded source). Over a long enough window, zero matching
+  posts give zeros rather than null.
 - posts_analyzed: X posts in the sample that are about the token (the
   sample is at most 40 posts spread over the window).
 - headlines: news headlines in the sample that are about the token.
@@ -800,6 +801,7 @@ def fetch_x_posts(
 
     mentions = None
     trend = None
+    splittable = end_time - start_time >= timedelta(hours=MIN_TREND_HOURS)
     try:
         counts = requests.get(
             X_COUNTS_URL,
@@ -819,14 +821,14 @@ def fetch_x_posts(
         meta = body.get("meta") or {}
         mentions = meta.get("total_tweet_count", meta.get("total_post_count"))
         trend = _mentions_trend(body.get("data"), start_time, end_time)
-        if trend is None and mentions == 0:
+        if trend is None and mentions == 0 and splittable:
             # nothing matched, so the missing buckets are the answer, not a fault
             trend = {"recent": 0, "previous": 0}
     except (requests.RequestException, ValueError, AttributeError) as e:
         print(f"[token_social_sentiment] X counts unavailable: {e}")
     if mentions is None:
         degraded.append("x_counts")
-    elif trend is None and end_time - start_time >= timedelta(hours=MIN_TREND_HOURS):
+    elif trend is None and splittable:
         # the count arrived but its buckets did not: say so instead of leaving
         # a null that reads like "the window was too short"
         degraded.append("x_trend")

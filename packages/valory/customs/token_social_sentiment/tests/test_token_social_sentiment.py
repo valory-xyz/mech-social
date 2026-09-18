@@ -916,6 +916,22 @@ def test_zero_matching_posts_give_a_zero_trend(monkeypatch: Any) -> None:
     assert (mentions, trend, degraded) == (0, {"recent": 0, "previous": 0}, [])
 
 
+def test_zero_matching_posts_in_a_short_window_stay_null(monkeypatch: Any) -> None:
+    """Under MIN_TREND_HOURS the window rule wins: no trend, no flag."""
+
+    def fake_get(url: str, **_: Any) -> Any:
+        if url == tool.X_COUNTS_URL:
+            return _x_response(data=[], meta={"total_tweet_count": 0})
+        return _x_response(data=[])
+
+    monkeypatch.setattr(tool.requests, "get", fake_get)
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    _, mentions, trend, degraded, _ = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=1), end
+    )
+    assert (mentions, trend, degraded) == (0, None, [])
+
+
 def test_trend_needs_buckets_in_both_halves() -> None:
     """Buckets missing from one half alone drop the trend instead of reading as a move."""
     end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
