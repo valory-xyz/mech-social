@@ -14,7 +14,8 @@ defaults:
         or free text such as "How is sentiment on $PEPE today?". An EVM address
         gives the most exact answer. window_seconds defaults to 86400 (24 h)
         and is clamped to 3600..604740, so ask for 3600 for "right now" and
-        604740 for a week. The tool does not discover or rank tokens, does not
+        604740 for a week; in free text an explicit period such as "over the
+        past week" or "last 3 days" sets it. The tool does not discover or rank tokens, does not
         answer questions about several tokens, and returns no list of scam or
         rug-pull warnings: it measures the sentiment of the token named in the
         request over the window.
@@ -48,7 +49,9 @@ defaults:
               carries "x_trend").
               posts_analyzed: on-topic X posts in the sample (at most 40).
               warnings: list of {type, message}, type symbol_mismatch,
-              chain_mismatch, symbol_unverified or address_not_listed.
+              chain_mismatch, symbol_unverified, address_not_listed or
+              busier_token_same_ticker (a thin or unlisted address; the
+              message names the token with the most DEX volume for the ticker).
               degraded_sources: sources that failed while a result was still
               produced (x, x_partial, x_counts, x_trend, news, dexscreener). error: null
               or {type, message}, type invalid_input, source_unavailable,

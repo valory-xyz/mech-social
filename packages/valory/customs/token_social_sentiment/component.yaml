@@ -4,18 +4,19 @@ version: 0.1.0
 type: custom
 description: 'Measures social sentiment about the ONE token named in the request,
   from X posts and news headlines. Input: JSON {"symbol", "address", "chain", "window_seconds"}
-  (symbol or EVM address required; window defaults to 24h, 3600..604740) or free text
-  such as "How is sentiment on $PEPE today?". No token discovery or ranking, one token
-  per request. Output: JSON with sentiment (-1 to 1, null below 5 on-topic items),
-  breakdown counts, mentions, mentions_trend, posts_analyzed, top_posts, headlines,
-  reasoning, warnings, degraded_sources and error.'
+  (symbol or EVM address required; window defaults to 24h, 3600..604740, or "past
+  week" style periods in free text) or free text such as "How is sentiment on $PEPE
+  today?". No token discovery or ranking, one token per request. Output: JSON with
+  sentiment (-1 to 1, null below 5 on-topic items), breakdown counts, mentions, mentions_trend,
+  posts_analyzed, top_posts, headlines, reasoning, warnings, degraded_sources and
+  error.'
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeiegmjh5poyo6gdpp5gbikh5boskzqfoltzk2ulkqawleroopfunui
   tests/__init__.py: bafybeihqccfy6wls7e2jtgik5ddrmwpek5rztrielunr4tn2mtigvby6tu
-  tests/test_token_social_sentiment.py: bafybeib4jqc33pd3f6exonbxrls24sv2htmzzusebbvblhfeyw4clj7jke
-  token_social_sentiment.py: bafybeigcox6uvyhtuthjj2iujukuqaiz3p7jjhe6zu7mr2d5mjmqonpoem
+  tests/test_token_social_sentiment.py: bafybeiepykav6utjojmhmdts7hm75si72tospr4stfkerw4ypauxbpx55y
+  token_social_sentiment.py: bafybeie7gcd6fqsygz2vsjqyc2352u46ywjoodijrfwhzidj4h6lzwehyy
 fingerprint_ignore_patterns: []
 entry_point: token_social_sentiment.py
 callable: run
