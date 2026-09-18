@@ -371,6 +371,93 @@ def test_shared_ticker_narrows_search(
     assert any("shared with other, larger tokens" in n for n in notes) is narrow
 
 
+def test_busier_token_is_named_for_a_thin_address(stubs: Dict[str, MagicMock]) -> None:
+    """An address with under a quarter of its ticker's volume gets the busiest one named."""
+    stubs["resolve"].return_value = {
+        "symbol": "FUN",
+        "chain": "robinhood",
+        "volume": 100.0,
+        "fdv": 38_000.0,
+    }
+    stubs["search"].return_value = [
+        _pair("FUN", OTHER_ADDRESS, 900.0, chain="base"),
+        _pair("FUN", ADDRESS, 100.0),
+    ]
+    stubs["volumes"].return_value = {OTHER_ADDRESS.lower(): 900.0, ADDRESS: 100.0}
+    result = _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
+    busier = [w for w in result["warnings"] if w["type"] == "busier_token_same_ticker"]
+    assert len(busier) == 1
+    assert OTHER_ADDRESS in busier[0]["message"] and "on base" in busier[0]["message"]
+    assert busier[0]["message"] in result["reasoning"]
+
+
+def test_unlisted_address_gets_the_busiest_token_named(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """A copycat address DexScreener does not list points to the real one."""
+    stubs["resolve"].return_value = {}
+    stubs["search"].return_value = [_pair("FUN", OTHER_ADDRESS, 900.0)]
+    stubs["volumes"].return_value = {OTHER_ADDRESS.lower(): 900.0}
+    result = _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
+    assert [w["type"] for w in result["warnings"]] == [
+        "address_not_listed",
+        "busier_token_same_ticker",
+    ]
+
+
+def test_no_busier_token_warning_when_the_address_dominates(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """The address that carries its ticker's volume gets no warning."""
+    stubs["resolve"].return_value = {
+        "symbol": "FUN",
+        "chain": "robinhood",
+        "volume": 100.0,
+        "fdv": 38_000.0,
+    }
+    stubs["search"].return_value = [_pair("FUN", OTHER_ADDRESS, 10.0)]
+    stubs["volumes"].return_value = {OTHER_ADDRESS.lower(): 10.0, ADDRESS: 100.0}
+    result = _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
+    assert result["warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "text,seconds",
+    [
+        ("How is sentiment on $X over the past week?", 7 * 86400),
+        ("last 3 days of $X", 3 * 86400),
+        ("past 12 hours on $X", 12 * 3600),
+        ("$X in the last hour", 3600),
+        ("How is $X right now?", None),
+        ("$X today", None),
+        ("$X past week vs last 24 hours", None),
+        ("$X 24h volume", None),
+    ],
+)
+def test_window_from_text(text: str, seconds: Any) -> None:
+    """Only an explicit past/last N period sets the window; two periods are not guessed."""
+    assert tool.window_from_text(text) == seconds
+
+
+def test_free_text_period_sets_the_window_and_says_so(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """A week asked in free text is clamped like window_seconds and noted."""
+    result = _run(f"Sentiment on $PEPE {ADDRESS} over the past week?")
+    assert result["window_seconds"] == tool.MAX_WINDOW_SECONDS
+    assert "Window taken from the request: 7 day(s)." in result["reasoning"]
+    result = _run(f"Sentiment on $PEPE {ADDRESS} over the last 3 days?")
+    assert result["window_seconds"] == 3 * 86400
+    assert "Window taken from the request: 3 day(s)." in result["reasoning"]
+
+
+def test_json_window_is_not_read_from_text(stubs: Dict[str, MagicMock]) -> None:
+    """A JSON request keeps its own window_seconds, or the default."""
+    result = _run(json.dumps({"symbol": "PEPE", "address": ADDRESS}))
+    assert result["window_seconds"] == tool.DEFAULT_WINDOW_SECONDS
+    assert "Window taken from the request" not in result["reasoning"]
+
+
 def test_share_exactly_at_threshold_is_not_narrowed(
     stubs: Dict[str, MagicMock],
 ) -> None:

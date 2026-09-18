@@ -39,7 +39,9 @@ Input (the request `prompt`, one of):
   $cashtag, otherwise from one LLM extraction call; without an address the
   extraction also runs next to a $cashtag, so "$BTC or Ethereum" counts as two
   tokens. An address is only used if it is written in the text. Two or more
-  tokens or addresses are rejected.
+  tokens or addresses are rejected. An explicit period ("over the past week",
+  "last 3 days", "past 12 hours") sets the window, clamped like
+  window_seconds; anything else keeps the default.
 
 Output (JSON string, always all keys):
 - token, address, chain, window_seconds: what was actually analyzed.
@@ -72,14 +74,18 @@ Output (JSON string, always all keys):
   lookups or sources, and the warnings below). With no score it also gives the
   X query and how many posts matched, were sampled, dropped and not on-topic.
 - warnings: list of {"type": "symbol_mismatch" | "chain_mismatch" |
-  "symbol_unverified" | "address_not_listed", "message": "..."}, empty when
+  "symbol_unverified" | "address_not_listed" | "busier_token_same_ticker",
+  "message": "..."}, empty when
   none. symbol_mismatch: the symbol (given or extracted from free text) is not
   the contract address's; the address's symbol is analyzed. chain_mismatch:
   the address has no DexScreener pair on the requested chain; its busiest
   chain is used. symbol_unverified: DexScreener lists the address, but its
   listed symbol is not a plain ticker, so a given symbol is used unchecked.
   address_not_listed: no DexScreener pair has the address as its base token,
-  so nothing about the token is verified.
+  so nothing about the token is verified. busier_token_same_ticker: the
+  address holds under a quarter of the DEX volume of its ticker (an unlisted
+  address counts as zero); the message names the busiest token with that
+  ticker, which may be the one meant.
 - degraded_sources: sources that failed while the request still produced a
   result: "x" (all X search slices), "x_partial" (some slices), "x_counts",
   "x_trend" (the count arrived without enough usable hourly buckets), "news",
@@ -116,7 +122,11 @@ from pydantic import BaseModel, Field
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
 ErrorType = Literal["invalid_input", "source_unavailable", "llm_error", "internal"]
 WarningType = Literal[
-    "symbol_mismatch", "chain_mismatch", "symbol_unverified", "address_not_listed"
+    "symbol_mismatch",
+    "chain_mismatch",
+    "symbol_unverified",
+    "address_not_listed",
+    "busier_token_same_ticker",
 ]
 
 ALLOWED_TOOLS = ["token_social_sentiment"]
@@ -256,6 +266,11 @@ SMART_TAG_RE = re.compile(
 TAGS_RE = re.compile(r"[@$#]\w+")
 WORD_RE = re.compile(r"[^\W\d_]{2,}")
 CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
+# an explicit period in free text, e.g. "over the past week", "last 3 days"
+WINDOW_TEXT_RE = re.compile(
+    r"\b(?:past|last|previous)\s+(?:(\d{1,3})\s+)?(hour|day|week)s?\b", re.IGNORECASE
+)
+WINDOW_UNIT_SECONDS = {"hour": 3600, "day": 86400, "week": 7 * 86400}
 CASHTAG_RE = re.compile(r"\$([A-Za-z][A-Za-z0-9]{0,14})\b")
 SYMBOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,14}$")
 CHAIN_RE = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,29}$")
@@ -473,6 +488,7 @@ def parse_prompt(prompt: str) -> Dict[str, Any]:
         return parsed
 
     parsed["free_text"] = text
+    parsed["window_seconds"] = window_from_text(text)
     found = ADDRESS_RE.findall(text)
     distinct = {a.lower() for a in found}
     if len(distinct) > 1:
@@ -491,6 +507,23 @@ def parse_prompt(prompt: str) -> Dict[str, Any]:
     if cashtags:
         parsed["symbol"] = cashtags[0]
     return parsed
+
+
+def window_from_text(text: str) -> Optional[int]:
+    """Read an explicit period such as "over the past week" from free text.
+
+    Only "past / last / previous [N] hour(s) / day(s) / week(s)" counts, so
+    "right now" or "today" keep the default window. Two different periods in
+    one request are not guessed between.
+
+    :param text: the free-text prompt.
+    :return: the period in seconds (clamped later), or None.
+    """
+    periods = {
+        int(count or 1) * WINDOW_UNIT_SECONDS[unit.lower()]
+        for count, unit in WINDOW_TEXT_RE.findall(text)
+    }
+    return periods.pop() if len(periods) == 1 else None
 
 
 def validate_chain(chain: Any) -> Optional[str]:
@@ -1401,6 +1434,7 @@ def _resolve_target(
                 f"may be mixed in."
             )
         elif share < MIN_TICKER_SHARE:
+            _warn_busier_token(run_state, symbol, address, pairs or [])
             llm_notes.append(
                 "This ticker is shared with other, larger tokens: an item is "
                 "on-topic only if it names this chain or contract address, or is "
@@ -1436,6 +1470,35 @@ def _resolve_target(
         "narrow": narrow,
         "stock": stock,
     }
+
+
+def _warn_busier_token(
+    run_state: RunState, symbol: str, address: str, pairs: List[Dict[str, Any]]
+) -> None:
+    """Name the busiest token that uses the same ticker as a small or unlisted one.
+
+    A requester holding a copycat or a thin token gets the address most $SYMBOL
+    trading happens on, so it can check which one it meant.
+
+    :param run_state: shared "notes" and "warnings" lists.
+    :param symbol: the ticker.
+    :param address: the requested contract address.
+    :param pairs: search_ticker() result.
+    """
+    others = [p for p in pairs if _pair_address(p) != address.lower()]
+    if not others:
+        return
+    busiest = max(others, key=_pair_volume)
+    base = str((busiest.get("baseToken") or {}).get("address", ""))
+    chain = str(busiest.get("chainId") or "").strip().lower()
+    if not ADDRESS_RE.fullmatch(base) or not CHAIN_RE.match(chain):
+        return
+    _warn(
+        run_state,
+        "busier_token_same_ticker",
+        f"Most ${symbol} DEX volume is on another token: {base} on {chain}; "
+        f"check that the requested address is the one meant.",
+    )
 
 
 def _fetch_items(
@@ -1586,6 +1649,14 @@ def analyze(
     }
     result["degraded_sources"] = run_state["degraded"]
     result["warnings"] = run_state["warnings"]
+    if parsed["free_text"] is not None and parsed["window_seconds"] is not None:
+        asked = parsed["window_seconds"]
+        period = (
+            f"{asked // 86400} day(s)"
+            if asked % 86400 == 0
+            else f"{asked // 3600} hour(s)"
+        )
+        run_state["notes"].append(f"Window taken from the request: {period}.")
     target = _resolve_target(parsed, client, model, counter_callback, run_state)
     result["token"] = target["symbol"]
     result["address"] = target["address"]
