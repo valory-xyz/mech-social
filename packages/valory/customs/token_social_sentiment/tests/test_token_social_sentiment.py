@@ -141,6 +141,9 @@ def test_structured_happy_path(stubs: Dict[str, MagicMock]) -> None:
     # breakdown counts posts and headlines: 7 posts + n1
     assert result["breakdown"] == {"bullish": 5, "neutral": 2, "bearish": 1}
     assert result["sentiment"] == 0.5
+    assert result["sentiment_interval"] == tool.sentiment_interval(
+        {"bullish": 5, "neutral": 2, "bearish": 1}
+    )
     assert result["headlines"] == [{"title": "news 0", "url": "https://news/0"}]
     # most engaged on-topic posts first; p8 (id 107) is off_topic
     assert result["top_posts"] == [
@@ -532,6 +535,7 @@ def test_too_few_on_topic_gives_null_sentiment(
     assert result["sentiment"] is None
     assert result["breakdown"] is None
     assert "too few for a reliable score" in result["reasoning"]
+    assert result["sentiment_interval"] is None
     assert result["reasoning"].endswith(_search_note("1830", 8, 0, unscored))
 
 
@@ -971,6 +975,27 @@ def test_trend_degradation_reaches_the_output(stubs: Dict[str, MagicMock]) -> No
     assert result["degraded_sources"] == ["x_trend"]
     assert result["mentions_trend"] is None
     assert "X post count lacks usable hourly buckets; no trend." in result["reasoning"]
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [(5, 0, 0), (7, 1, 0), (12, 10, 2), (9, 18, 2), (0, 2, 6), (20, 5, 1)],
+)
+def test_sentiment_interval_contains_the_score(counts: Any) -> None:
+    """The range holds the score, stays inside -1..1 and is never zero-width."""
+    bullish, neutral, bearish = counts
+    breakdown = {"bullish": bullish, "neutral": neutral, "bearish": bearish}
+    score = (bullish - bearish) / sum(counts)
+    interval = tool.sentiment_interval(breakdown)
+    assert -1.0 <= interval["low"] <= round(score, 2) <= interval["high"] <= 1.0
+    assert interval["high"] - interval["low"] > 0
+
+
+def test_sentiment_interval_narrows_with_more_items() -> None:
+    """The same mix over four times the items gives about half the width."""
+    small = tool.sentiment_interval({"bullish": 6, "neutral": 4, "bearish": 2})
+    large = tool.sentiment_interval({"bullish": 24, "neutral": 16, "bearish": 8})
+    assert (large["high"] - large["low"]) < 0.6 * (small["high"] - small["low"])
 
 
 def test_query_excludes_the_bot_templates_by_name() -> None:

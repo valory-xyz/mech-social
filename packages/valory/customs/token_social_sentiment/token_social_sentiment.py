@@ -45,6 +45,9 @@ Output (JSON string, always all keys):
 - token, address, chain, window_seconds: what was actually analyzed.
 - sentiment: (bullish - bearish) / (bullish + neutral + bearish), from -1 to
   1. Null (and breakdown null) when fewer than 5 on-topic items.
+- sentiment_interval: {"low": x, "high": y}, the range the score could take
+  from sampling alone (95%, from the breakdown). Two readings whose ranges
+  overlap are not different answers. Null when sentiment is null.
 - breakdown: NUMBER of on-topic sample items (posts_analyzed posts plus the
   returned headlines) that are bullish / neutral / bearish. It counts sample
   items, not `mentions`.
@@ -86,6 +89,7 @@ Output (JSON string, always all keys):
 import html
 import itertools
 import json
+import math
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -259,6 +263,7 @@ OUTPUT_KEYS = (
     "chain",
     "window_seconds",
     "sentiment",
+    "sentiment_interval",
     "mentions",
     "mentions_trend",
     "posts_analyzed",
@@ -1642,8 +1647,33 @@ def analyze(
     result["sentiment"] = round(
         (breakdown["bullish"] - breakdown["bearish"]) / on_topic, 2
     )
+    result["sentiment_interval"] = sentiment_interval(breakdown)
     result["reasoning"] = " ".join(notes + [labels.reasoning])
     return result
+
+
+def sentiment_interval(breakdown: Dict[str, int]) -> Dict[str, float]:
+    """Range the score could take from sampling alone.
+
+    Each on-topic item counts +1, 0 or -1, so the score is a mean and its
+    standard error comes from the breakdown. One bullish and one bearish
+    pseudo-item widen the spread, so a small unanimous sample does not get a
+    zero-width range.
+
+    :param breakdown: on-topic items per class.
+    :return: {"low", "high"}, a 95% range clipped to -1..1.
+    """
+    bullish, bearish = breakdown["bullish"], breakdown["bearish"]
+    count = bullish + breakdown["neutral"] + bearish
+    score = (bullish - bearish) / count
+    smoothed = count + 2
+    mean = (bullish - bearish) / smoothed
+    spread = ((bullish + bearish + 2) / smoothed - mean**2) / smoothed
+    margin = 1.96 * math.sqrt(spread)
+    return {
+        "low": round(max(-1.0, score - margin), 2),
+        "high": round(min(1.0, score + margin), 2),
+    }
 
 
 def _error_result(
