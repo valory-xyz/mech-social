@@ -50,7 +50,14 @@ Output (JSON string, always all keys):
   items, not `mentions`.
 - mentions: total X posts matching the search in the window (X counts
   endpoint). Includes spam and off-topic posts; it measures attention, not
-  sentiment.
+  sentiment. The search excludes the bot templates listed in
+  X_QUERY_EXCLUSIONS, so it is lower than a bare cashtag count.
+- mentions_trend: {"recent": n, "previous": m}, matching posts in the newer
+  half of the window and in the older half. Null when the count is
+  unavailable, for windows under MIN_TREND_HOURS, and when the hourly buckets
+  cover less than MIN_TREND_COVERAGE of either half of the window (then
+  "x_trend" is a degraded source). Over a long enough window, zero matching
+  posts give zeros rather than null.
 - posts_analyzed: X posts in the sample that are about the token (the
   sample is at most 40 posts spread over the window).
 - headlines: news headlines in the sample that are about the token.
@@ -70,7 +77,8 @@ Output (JSON string, always all keys):
   so nothing about the token is verified.
 - degraded_sources: sources that failed while the request still produced a
   result: "x" (all X search slices), "x_partial" (some slices), "x_counts",
-  "news", "dexscreener".
+  "x_trend" (the count arrived without enough usable hourly buckets), "news",
+  "dexscreener".
 - error: null, or {"type": "invalid_input" | "source_unavailable" |
   "llm_error" | "internal", "message": "..."}; data fields are null then.
 """
@@ -176,6 +184,16 @@ SERPER_QUERY_USD = 0.001
 LLM_TIMEOUT = 30
 LLM_MAX_RETRIES = 1
 
+# Bot templates excluded in the query itself, so that the 40 posts a request
+# reads are not filled by a shill wave. X drops punctuation inside a quoted
+# phrase, so "CA:" matches the word "ca".
+X_QUERY_EXCLUSIONS = '-"watch update" -"detect paid" -"CA:"'
+
+# a trend needs a window long enough that clock-hour buckets can be split
+MIN_TREND_HOURS = 4
+# and enough of that window covered by usable buckets
+MIN_TREND_COVERAGE = 0.75
+
 X_SEARCH_URL = "https://api.x.com/2/tweets/search/recent"
 X_COUNTS_URL = "https://api.x.com/2/tweets/counts/recent"
 SERPER_NEWS_URL = "https://google.serper.dev/news"
@@ -242,6 +260,7 @@ OUTPUT_KEYS = (
     "window_seconds",
     "sentiment",
     "mentions",
+    "mentions_trend",
     "posts_analyzed",
     "breakdown",
     "reasoning",
@@ -251,6 +270,13 @@ OUTPUT_KEYS = (
     "degraded_sources",
     "error",
 )
+
+
+class MentionsTrend(TypedDict):
+    """Matching posts in the newer and the older half of the window."""
+
+    recent: int
+    previous: int
 
 
 class RunState(TypedDict):
@@ -672,7 +698,7 @@ def build_x_query(
     :param address: token contract address.
     :param chain: chain name, used to narrow a shared ticker.
     :param narrow: the ticker is shared with larger tokens; avoid a bare cashtag.
-    :return: X search query string.
+    :return: X search query string, with the bot templates excluded.
     """
     terms = []
     if symbol and not narrow:
@@ -681,7 +707,7 @@ def build_x_query(
         terms.append(f'(${symbol} "{chain}")')
     if address:
         terms.append(f'"{address}"')
-    return f"({' OR '.join(terms)}) -is:retweet"
+    return f"({' OR '.join(terms)}) {X_QUERY_EXCLUSIONS} -is:retweet"
 
 
 def _dedupe_key(text: str) -> str:
@@ -696,8 +722,10 @@ def _dedupe_key(text: str) -> str:
 
 def fetch_x_posts(
     bearer: str, query: str, start_time: datetime, end_time: datetime
-) -> Tuple[List[Dict[str, Any]], Optional[int], List[str], float]:
-    """Fetch X posts spread over the window, and the total post count.
+) -> Tuple[
+    List[Dict[str, Any]], Optional[int], Optional[MentionsTrend], List[str], float
+]:
+    """Fetch X posts spread over the window, the post count and its trend.
 
     A failed slice is skipped; the search only raises if every slice fails.
 
@@ -706,7 +734,8 @@ def fetch_x_posts(
     :param start_time: window start.
     :param end_time: window end.
     :return: (posts as {id, text, engagement}, total mentions or None,
-        degraded sources among "x_partial" and "x_counts", cost in USD of the
+        {"recent", "previous"} matching posts per half of the window or None,
+        degraded sources among "x_partial", "x_counts" and "x_trend", cost in USD of the
         posts read and the counts request).
     """
     headers = {"Authorization": f"Bearer {bearer}"}
@@ -771,6 +800,8 @@ def fetch_x_posts(
     degraded = ["x_partial"] if failed_slices else []
 
     mentions = None
+    trend = None
+    splittable = end_time - start_time >= timedelta(hours=MIN_TREND_HOURS)
     try:
         counts = requests.get(
             X_COUNTS_URL,
@@ -779,19 +810,98 @@ def fetch_x_posts(
                 "query": query,
                 "start_time": start_time.strftime(fmt),
                 "end_time": end_time.strftime(fmt),
-                "granularity": "day",
+                # hourly costs the same as daily and carries the trend
+                "granularity": "hour",
             },
             timeout=HTTP_TIMEOUT,
         )
         counts.raise_for_status()
         cost += X_COUNTS_REQUEST_USD
-        meta = counts.json().get("meta") or {}
+        body = counts.json()
+        meta = body.get("meta") or {}
         mentions = meta.get("total_tweet_count", meta.get("total_post_count"))
+        trend = _mentions_trend(body.get("data"), start_time, end_time)
+        if trend is None and mentions == 0 and splittable:
+            # nothing matched, so the missing buckets are the answer, not a fault
+            trend = {"recent": 0, "previous": 0}
     except (requests.RequestException, ValueError, AttributeError) as e:
         print(f"[token_social_sentiment] X counts unavailable: {e}")
     if mentions is None:
         degraded.append("x_counts")
-    return posts, mentions, degraded, cost
+    elif trend is None and splittable:
+        # the count arrived but its buckets did not: say so instead of leaving
+        # a null that reads like "the window was too short"
+        degraded.append("x_trend")
+    return posts, mentions, trend, degraded, cost
+
+
+def _bucket_span(
+    bucket: Dict[str, Any], start_time: datetime, end_time: datetime
+) -> Optional[Tuple[datetime, datetime, int, float]]:
+    """Read one counts bucket, clipped to the window.
+
+    :param bucket: one entry of the counts "data" list.
+    :param start_time: window start.
+    :param end_time: window end.
+    :return: (start, end, count, bucket length in seconds) with start and end
+        clipped to the window, or None when the bucket is unusable or falls
+        outside it. The length is the bucket's own, so a clipped bucket only
+        contributes the share of its count that falls inside the window.
+    """
+    try:
+        opens = datetime.fromisoformat(str(bucket["start"]).replace("Z", "+00:00"))
+        closes = (
+            datetime.fromisoformat(str(bucket["end"]).replace("Z", "+00:00"))
+            if bucket.get("end")
+            else opens + timedelta(hours=1)
+        )
+        count = int(bucket["tweet_count"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    length = (closes - opens).total_seconds()
+    opens, closes = max(opens, start_time), min(closes, end_time)
+    return (opens, closes, count, length) if closes > opens and length > 0 else None
+
+
+def _mentions_trend(
+    buckets: Any, start_time: datetime, end_time: datetime
+) -> Optional[MentionsTrend]:
+    """Split the hourly counts into the newer and the older half of the window.
+
+    X aligns buckets to the clock hour while the window does not, so a bucket
+    is shared between the halves in proportion to its overlap with each, and a
+    bucket that cannot be read is skipped rather than discarding the rest.
+
+    :param buckets: the "data" list of the X counts response.
+    :param start_time: window start.
+    :param end_time: window end.
+    :return: {"recent", "previous"}, or None for a window under
+        MIN_TREND_HOURS and when the usable buckets cover less than
+        MIN_TREND_COVERAGE of either half.
+    """
+    window = end_time - start_time
+    if not isinstance(buckets, list) or window < timedelta(hours=MIN_TREND_HOURS):
+        return None
+    middle = start_time + window / 2
+    recent = previous = 0.0
+    covered = {"recent": 0.0, "previous": 0.0}
+    for bucket in buckets:
+        span = _bucket_span(bucket, start_time, end_time)
+        if span is None:
+            continue
+        opens, closes, count, length = span
+        inside = (closes - opens).total_seconds()
+        in_recent = max(0.0, (closes - max(opens, middle)).total_seconds())
+        recent += count * in_recent / length
+        previous += count * (inside - in_recent) / length
+        covered["recent"] += in_recent
+        covered["previous"] += inside - in_recent
+    # per half: buckets missing from one half alone would read as a move
+    if min(covered.values()) < MIN_TREND_COVERAGE * window.total_seconds() / 2:
+        return None
+    # round once and derive the other half, so the two always add up
+    newer = round(recent)
+    return {"recent": newer, "previous": round(recent + previous) - newer}
 
 
 def is_promo(text: str, address: Optional[str]) -> bool:
@@ -1298,7 +1408,12 @@ def _fetch_items(
     api_keys: Any,
     window_seconds: int,
     run_state: RunState,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]], Optional[int]]:
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, str]],
+    Optional[int],
+    Optional[MentionsTrend],
+]:
     """Fetch X posts and news headlines for the target.
 
     :param target: _resolve_target() result.
@@ -1307,7 +1422,7 @@ def _fetch_items(
     :param run_state: shared "notes" and "degraded" lists, "cost" in USD,
         "x_query" (None when X was not searched), "sampled_posts" and
         "dropped_posts" (posts removed as promotion, wordless posts or copies).
-    :return: (posts, headlines, mentions).
+    :return: (posts, headlines, mentions, mentions trend).
     """
     notes, degraded = run_state["notes"], run_state["degraded"]
     symbol, address, chain, narrow = (
@@ -1321,12 +1436,13 @@ def _fetch_items(
     posts: List[Dict[str, Any]] = []
     headlines: List[Dict[str, str]] = []
     mentions = None
+    trend = None
 
     x_bearer = _api_key(api_keys, "x_bearer")
     if x_bearer:
         try:
             query = build_x_query(symbol, address, chain, narrow=narrow)
-            posts, mentions, x_degraded, x_cost = fetch_x_posts(
+            posts, mentions, trend, x_degraded, x_cost = fetch_x_posts(
                 x_bearer, query, start_time, end_time
             )
             degraded.extend(x_degraded)
@@ -1361,6 +1477,8 @@ def _fetch_items(
         notes.append("Some X time slices failed; the sample leans to the others.")
     if "x_counts" in degraded:
         notes.append("X post count unavailable.")
+    if "x_trend" in degraded:
+        notes.append("X post count lacks usable hourly buckets; no trend.")
     if "news" in degraded:
         notes.append("news unavailable.")
     kept = drop_waves(
@@ -1368,7 +1486,7 @@ def _fetch_items(
     )
     run_state["sampled_posts"] = len(posts)
     run_state["dropped_posts"] = len(posts) - len(kept)
-    return kept, headlines, mentions
+    return kept, headlines, mentions, trend
 
 
 def _sample_note(
@@ -1439,7 +1557,7 @@ def analyze(
     result["address"] = target["address"]
     result["chain"] = target["chain"]
 
-    posts, headlines, result["mentions"] = _fetch_items(
+    posts, headlines, result["mentions"], result["mentions_trend"] = _fetch_items(
         target, api_keys, result["window_seconds"], run_state
     )
     _count_source_cost(counter_callback, model, run_state["cost"])

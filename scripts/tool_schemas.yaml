@@ -9,9 +9,15 @@ defaults:
     input:
       type: text
       description: >-
-        One token per request: a JSON object {"symbol", "address", "chain",
-        "window_seconds"} with symbol or address required, or free text such
-        as "How is sentiment on $PEPE today?"
+        One token per request, named by the caller: a JSON object {"symbol",
+        "address", "chain", "window_seconds"} with symbol or address required,
+        or free text such as "How is sentiment on $PEPE today?". An EVM address
+        gives the most exact answer. window_seconds defaults to 86400 (24 h)
+        and is clamped to 3600..604740, so ask for 3600 for "right now" and
+        604740 for a week. The tool does not discover or rank tokens, does not
+        answer questions about several tokens, and returns no list of scam or
+        rug-pull warnings: it measures the sentiment of the token named in the
+        request over the window.
     output:
       type: object
       description: A JSON object containing the social sentiment for the token
@@ -28,12 +34,18 @@ defaults:
               sentiment: (bullish - bearish) / on-topic sample items, -1 to 1,
               null below 5 on-topic items. breakdown: number of on-topic sample
               items (posts plus headlines) per class, not mentions. mentions:
-              all X posts matching the search in the window, spam included.
+              all X posts matching the search in the window, spam included
+              (bot templates are excluded in the search itself).
+              mentions_trend: {"recent": n, "previous": m}, the matching posts
+              in the newer and the older half of the window; null when the
+              count is unavailable, when the window is under 4 hours, and when
+              the hourly buckets cover too little of it (then degraded_sources
+              carries "x_trend").
               posts_analyzed: on-topic X posts in the sample (at most 40).
               warnings: list of {type, message}, type symbol_mismatch,
               chain_mismatch, symbol_unverified or address_not_listed.
               degraded_sources: sources that failed while a result was still
-              produced (x, x_partial, x_counts, news, dexscreener). error: null
+              produced (x, x_partial, x_counts, x_trend, news, dexscreener). error: null
               or {type, message}, type invalid_input, source_unavailable,
               llm_error or internal.
             example: |-
@@ -44,6 +56,7 @@ defaults:
                 "window_seconds": 86400,
                 "sentiment": 0.5,
                 "mentions": 1250,
+                "mentions_trend": {"recent": 800, "previous": 450},
                 "posts_analyzed": 9,
                 "breakdown": {"bullish": 6, "neutral": 3, "bearish": 1},
                 "reasoning": "Most on-topic posts react positively to a new exchange listing.",
