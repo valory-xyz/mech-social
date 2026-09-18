@@ -84,8 +84,9 @@ Output (JSON string, always all keys):
   address_not_listed: no DexScreener pair has the address as its base token,
   so nothing about the token is verified. busier_token_same_ticker: the
   address holds under a quarter of the DEX volume of its ticker (an unlisted
-  address counts as zero); the message names the busiest token with that
-  ticker, which may be the one meant.
+  address counts as zero) and is not an established token (FDV under
+  NARROW_MAX_FDV); the message names the token with the most volume for that
+  ticker, summed over its pairs, which may be the one meant.
 - degraded_sources: sources that failed while the request still produced a
   result: "x" (all X search slices), "x_partial" (some slices), "x_counts",
   "x_trend" (the count arrived without enough usable hourly buckets), "news",
@@ -524,6 +525,18 @@ def window_from_text(text: str) -> Optional[int]:
         for count, unit in WINDOW_TEXT_RE.findall(text)
     }
     return periods.pop() if len(periods) == 1 else None
+
+
+def _period(seconds: int) -> str:
+    """Say a window in days when it is within a minute of whole days, else hours.
+
+    :param seconds: window length.
+    :return: e.g. "7 day(s)" (also for the 60 s short of 7 days) or "12 hour(s)".
+    """
+    days = round(seconds / 86400)
+    if days >= 1 and abs(seconds - days * 86400) <= 60:
+        return f"{days} day(s)"
+    return f"{round(seconds / 3600)} hour(s)"
 
 
 def validate_chain(chain: Any) -> Optional[str]:
@@ -1434,7 +1447,6 @@ def _resolve_target(
                 f"may be mixed in."
             )
         elif share < MIN_TICKER_SHARE:
-            _warn_busier_token(run_state, symbol, address, pairs or [])
             llm_notes.append(
                 "This ticker is shared with other, larger tokens: an item is "
                 "on-topic only if it names this chain or contract address, or is "
@@ -1448,6 +1460,11 @@ def _resolve_target(
                 )
             else:
                 narrow = True
+                # only a thin or unlisted address may be the wrong token: an
+                # established one just shares its ticker
+                _warn_busier_token(
+                    run_state, symbol, address, volumes or {}, pairs or []
+                )
                 if not chain:
                     notes.append(
                         f"${symbol} is shared with larger tokens and the chain is "
@@ -1473,30 +1490,40 @@ def _resolve_target(
 
 
 def _warn_busier_token(
-    run_state: RunState, symbol: str, address: str, pairs: List[Dict[str, Any]]
+    run_state: RunState,
+    symbol: str,
+    address: str,
+    volumes: Dict[str, float],
+    pairs: List[Dict[str, Any]],
 ) -> None:
-    """Name the busiest token that uses the same ticker as a small or unlisted one.
+    """Name the busiest token that uses the same ticker as a thin or unlisted one.
 
-    A requester holding a copycat or a thin token gets the address most $SYMBOL
-    trading happens on, so it can check which one it meant.
+    A requester holding a copycat or a thin token gets the address with the
+    most $SYMBOL DEX volume, summed over its pairs, so it can check which one it
+    meant.
 
     :param run_state: shared "notes" and "warnings" lists.
     :param symbol: the ticker.
     :param address: the requested contract address.
-    :param pairs: search_ticker() result.
+    :param volumes: symbol_volumes() result, 24h volume per token address.
+    :param pairs: search_ticker() result, for the busiest token's chain.
     """
-    others = [p for p in pairs if _pair_address(p) != address.lower()]
+    others = {a: v for a, v in volumes.items() if a != address.lower()}
     if not others:
         return
-    busiest = max(others, key=_pair_volume)
-    base = str((busiest.get("baseToken") or {}).get("address", ""))
-    chain = str(busiest.get("chainId") or "").strip().lower()
+    busiest = max(others, key=lambda a: others[a])
+    own_pairs = [p for p in pairs if _pair_address(p) == busiest]
+    if not own_pairs:
+        return
+    top = max(own_pairs, key=_pair_volume)
+    base = str((top.get("baseToken") or {}).get("address", ""))
+    chain = str(top.get("chainId") or "").strip().lower()
     if not ADDRESS_RE.fullmatch(base) or not CHAIN_RE.match(chain):
         return
     _warn(
         run_state,
         "busier_token_same_ticker",
-        f"Most ${symbol} DEX volume is on another token: {base} on {chain}; "
+        f"The busiest ${symbol} token on DEX is {base} on {chain}; "
         f"check that the requested address is the one meant.",
     )
 
@@ -1650,13 +1677,14 @@ def analyze(
     result["degraded_sources"] = run_state["degraded"]
     result["warnings"] = run_state["warnings"]
     if parsed["free_text"] is not None and parsed["window_seconds"] is not None:
-        asked = parsed["window_seconds"]
-        period = (
-            f"{asked // 86400} day(s)"
-            if asked % 86400 == 0
-            else f"{asked // 3600} hour(s)"
+        used = _period(result["window_seconds"])
+        asked = _period(parsed["window_seconds"])
+        run_state["notes"].append(
+            f"Window taken from the request: {used}."
+            if used == asked
+            else f"Window taken from the request: {asked} asked, {used} analysed "
+            f"(the supported range is 1 hour to 7 days)."
         )
-        run_state["notes"].append(f"Window taken from the request: {period}.")
     target = _resolve_target(parsed, client, model, counter_callback, run_state)
     result["token"] = target["symbol"]
     result["address"] = target["address"]

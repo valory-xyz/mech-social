@@ -387,7 +387,9 @@ def test_busier_token_is_named_for_a_thin_address(stubs: Dict[str, MagicMock]) -
     result = _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
     busier = [w for w in result["warnings"] if w["type"] == "busier_token_same_ticker"]
     assert len(busier) == 1
-    assert OTHER_ADDRESS in busier[0]["message"] and "on base" in busier[0]["message"]
+    assert busier[0]["message"].startswith(
+        f"The busiest $FUN token on DEX is {OTHER_ADDRESS} on base;"
+    )
     assert busier[0]["message"] in result["reasoning"]
 
 
@@ -421,6 +423,47 @@ def test_no_busier_token_warning_when_the_address_dominates(
     assert result["warnings"] == []
 
 
+def test_no_busier_token_warning_for_an_established_token(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """A large token that merely shares its ticker is not flagged as a copycat."""
+    stubs["resolve"].return_value = {
+        "symbol": "FUN",
+        "chain": "arbitrum",
+        "volume": 100.0,
+        "fdv": 200e6,
+    }
+    stubs["search"].return_value = [_pair("FUN", OTHER_ADDRESS, 900.0, chain="base")]
+    stubs["volumes"].return_value = {OTHER_ADDRESS.lower(): 900.0, ADDRESS: 100.0}
+    result = _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
+    assert result["warnings"] == []
+
+
+def test_busiest_token_sums_its_pairs(stubs: Dict[str, MagicMock]) -> None:
+    """Three 400 pairs of one token beat a single 500 pair of another."""
+    third = "0x" + "c" * 40
+    stubs["resolve"].return_value = {
+        "symbol": "FUN",
+        "chain": "robinhood",
+        "volume": 100.0,
+        "fdv": 38_000.0,
+    }
+    stubs["search"].return_value = [
+        _pair("FUN", third, 500.0, chain="bsc"),
+        *[_pair("FUN", OTHER_ADDRESS, 400.0, chain="base") for _ in range(3)],
+        _pair("FUN", ADDRESS, 100.0),
+    ]
+    stubs["volumes"].return_value = {
+        third: 500.0,
+        OTHER_ADDRESS.lower(): 1200.0,
+        ADDRESS: 100.0,
+    }
+    result = _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
+    busier = [w for w in result["warnings"] if w["type"] == "busier_token_same_ticker"]
+    assert len(busier) == 1
+    assert f"{OTHER_ADDRESS} on base" in busier[0]["message"]
+
+
 @pytest.mark.parametrize(
     "text,seconds",
     [
@@ -449,6 +492,26 @@ def test_free_text_period_sets_the_window_and_says_so(
     result = _run(f"Sentiment on $PEPE {ADDRESS} over the last 3 days?")
     assert result["window_seconds"] == 3 * 86400
     assert "Window taken from the request: 3 day(s)." in result["reasoning"]
+    result = _run(f"Sentiment on $PEPE {ADDRESS} over the last 30 days?")
+    assert result["window_seconds"] == tool.MAX_WINDOW_SECONDS
+    assert (
+        "Window taken from the request: 30 day(s) asked, 7 day(s) analysed"
+        in result["reasoning"]
+    )
+
+
+@pytest.mark.parametrize(
+    "seconds,text",
+    [
+        (7 * 86400, "7 day(s)"),
+        (7 * 86400 - 60, "7 day(s)"),
+        (12 * 3600, "12 hour(s)"),
+        (3600, "1 hour(s)"),
+    ],
+)
+def test_period(seconds: int, text: str) -> None:
+    """Windows within a minute of whole days read as days."""
+    assert tool._period(seconds) == text  # pylint: disable=protected-access
 
 
 def test_json_window_is_not_read_from_text(stubs: Dict[str, MagicMock]) -> None:
