@@ -900,6 +900,63 @@ def test_short_window_without_buckets_is_not_degraded(monkeypatch: Any) -> None:
     assert trend is None and degraded == []
 
 
+def test_zero_matching_posts_give_a_zero_trend(monkeypatch: Any) -> None:
+    """A window nothing matched reports zeros, not a missing trend."""
+
+    def fake_get(url: str, **_: Any) -> Any:
+        if url == tool.X_COUNTS_URL:
+            return _x_response(data=[], meta={"total_tweet_count": 0})
+        return _x_response(data=[])
+
+    monkeypatch.setattr(tool.requests, "get", fake_get)
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    _, mentions, trend, degraded, _ = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=24), end
+    )
+    assert (mentions, trend, degraded) == (0, {"recent": 0, "previous": 0}, [])
+
+
+def test_trend_needs_buckets_in_both_halves() -> None:
+    """Buckets missing from one half alone drop the trend instead of reading as a move."""
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    start = end - timedelta(hours=24)
+    buckets = _buckets(start, 24)
+    for bucket in buckets[:8]:
+        bucket["tweet_count"] = "nonsense"
+    assert tool._mentions_trend(buckets, start, end) is None
+
+
+def test_trend_halves_add_up_to_the_rounded_total() -> None:
+    """The two halves always sum to the rounded total, off the hour included."""
+    end = datetime(2026, 9, 16, 12, 37, tzinfo=timezone.utc)
+    start = end - timedelta(hours=5)
+    buckets = _buckets(start, 5, count=5)
+    trend = tool._mentions_trend(buckets, start, end)
+    assert trend is not None
+    assert trend["recent"] + trend["previous"] == round(
+        sum(
+            b["tweet_count"]
+            * (
+                min(datetime.fromisoformat(b["end"].replace("Z", "+00:00")), end)
+                - max(datetime.fromisoformat(b["start"].replace("Z", "+00:00")), start)
+            ).total_seconds()
+            / 3600
+            for b in buckets
+            if max(datetime.fromisoformat(b["start"].replace("Z", "+00:00")), start)
+            < min(datetime.fromisoformat(b["end"].replace("Z", "+00:00")), end)
+        )
+    )
+
+
+def test_trend_degradation_reaches_the_output(stubs: Dict[str, MagicMock]) -> None:
+    """x_trend and its note reach degraded_sources and reasoning."""
+    stubs["x"].return_value = (_posts(8), 1830, None, ["x_trend"], 0.0)
+    result = _run(PEPE_PROMPT)
+    assert result["degraded_sources"] == ["x_trend"]
+    assert result["mentions_trend"] is None
+    assert "X post count lacks usable hourly buckets; no trend." in result["reasoning"]
+
+
 def test_query_excludes_the_bot_templates_by_name() -> None:
     """The query carries the exclusions themselves, not just the constant."""
     query = tool.build_x_query("PEPE", ADDRESS, "ethereum")

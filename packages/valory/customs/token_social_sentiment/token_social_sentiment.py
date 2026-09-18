@@ -55,8 +55,8 @@ Output (JSON string, always all keys):
 - mentions_trend: {"recent": n, "previous": m}, matching posts in the newer
   half of the window and in the older half. Null when the count is
   unavailable, for windows under MIN_TREND_HOURS, and when the hourly buckets
-  cover less than MIN_TREND_COVERAGE of the window (then "x_trend" is a
-  degraded source).
+  cover less than MIN_TREND_COVERAGE of either half of the window (then
+  "x_trend" is a degraded source). Zero matching posts give zeros, not null.
 - posts_analyzed: X posts in the sample that are about the token (the
   sample is at most 40 posts spread over the window).
 - headlines: news headlines in the sample that are about the token.
@@ -76,7 +76,7 @@ Output (JSON string, always all keys):
   so nothing about the token is verified.
 - degraded_sources: sources that failed while the request still produced a
   result: "x" (all X search slices), "x_partial" (some slices), "x_counts",
-  "x_trend" (the count arrived without usable hourly buckets), "news",
+  "x_trend" (the count arrived without enough usable hourly buckets), "news",
   "dexscreener".
 - error: null, or {"type": "invalid_input" | "source_unavailable" |
   "llm_error" | "internal", "message": "..."}; data fields are null then.
@@ -185,9 +185,7 @@ LLM_MAX_RETRIES = 1
 
 # Bot templates excluded in the query itself, so that the 40 posts a request
 # reads are not filled by a shill wave. X drops punctuation inside a quoted
-# phrase, so "CA:" matches the word "ca" (checked with counts: "CA:", "CA" and
-# ca return the same total); in the blind-labelled samples that word carries
-# 6% of the on-topic posts, against 34% of all posts.
+# phrase, so "CA:" matches the word "ca".
 X_QUERY_EXCLUSIONS = '-"watch update" -"detect paid" -"CA:"'
 
 # a trend needs a window long enough that clock-hour buckets can be split
@@ -821,6 +819,9 @@ def fetch_x_posts(
         meta = body.get("meta") or {}
         mentions = meta.get("total_tweet_count", meta.get("total_post_count"))
         trend = _mentions_trend(body.get("data"), start_time, end_time)
+        if trend is None and mentions == 0:
+            # nothing matched, so the missing buckets are the answer, not a fault
+            trend = {"recent": 0, "previous": 0}
     except (requests.RequestException, ValueError, AttributeError) as e:
         print(f"[token_social_sentiment] X counts unavailable: {e}")
     if mentions is None:
@@ -874,19 +875,16 @@ def _mentions_trend(
     :param end_time: window end.
     :return: {"recent", "previous"}, or None for a window under
         MIN_TREND_HOURS and when the usable buckets cover less than
-        MIN_TREND_COVERAGE of it.
+        MIN_TREND_COVERAGE of either half.
     """
     window = end_time - start_time
     if not isinstance(buckets, list) or window < timedelta(hours=MIN_TREND_HOURS):
         return None
     middle = start_time + window / 2
-    recent = previous = covered = 0.0
+    recent = previous = 0.0
+    covered = {"recent": 0.0, "previous": 0.0}
     for bucket in buckets:
-        span = (
-            _bucket_span(bucket, start_time, end_time)
-            if isinstance(bucket, dict)
-            else None
-        )
+        span = _bucket_span(bucket, start_time, end_time)
         if span is None:
             continue
         opens, closes, count, length = span
@@ -894,10 +892,14 @@ def _mentions_trend(
         in_recent = max(0.0, (closes - max(opens, middle)).total_seconds())
         recent += count * in_recent / length
         previous += count * (inside - in_recent) / length
-        covered += inside
-    if covered < MIN_TREND_COVERAGE * window.total_seconds():
+        covered["recent"] += in_recent
+        covered["previous"] += inside - in_recent
+    # per half: buckets missing from one half alone would read as a move
+    if min(covered.values()) < MIN_TREND_COVERAGE * window.total_seconds() / 2:
         return None
-    return {"recent": round(recent), "previous": round(previous)}
+    # round once and derive the other half, so the two always add up
+    newer = round(recent)
+    return {"recent": newer, "previous": round(recent + previous) - newer}
 
 
 def is_promo(text: str, address: Optional[str]) -> bool:
@@ -1474,7 +1476,7 @@ def _fetch_items(
     if "x_counts" in degraded:
         notes.append("X post count unavailable.")
     if "x_trend" in degraded:
-        notes.append("X post count has no usable hourly buckets; no trend.")
+        notes.append("X post count lacks usable hourly buckets; no trend.")
     if "news" in degraded:
         notes.append("news unavailable.")
     kept = drop_waves(
