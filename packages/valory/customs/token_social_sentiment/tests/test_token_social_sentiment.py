@@ -998,6 +998,35 @@ def test_sentiment_interval_narrows_with_more_items() -> None:
     assert (large["high"] - large["low"]) < 0.6 * (small["high"] - small["low"])
 
 
+def test_search_note_uses_the_singular_for_one_post() -> None:
+    """One matching post reads "1 matching post", not "1 matching posts"."""
+    run_state = {"x_query": "q", "sampled_posts": 1, "dropped_posts": 0}
+    note = tool._sample_note(run_state, 1, 0)  # type: ignore[arg-type]
+    assert note == [
+        "X search q: 1 matching post, 1 sampled, 0 dropped as promotion, "
+        "wordless posts or copies, 0 not on-topic."
+    ]
+
+
+def test_fetch_x_posts_names_its_fields(monkeypatch: Any) -> None:
+    """The search result is read by name, so a new field cannot shift the others."""
+
+    def fake_get(url: str, **_: Any) -> Any:
+        if url == tool.X_COUNTS_URL:
+            return _x_response(data=[], meta={"total_tweet_count": 0})
+        return _x_response(data=[{"id": "1", "text": "hi $PEPE"}])
+
+    monkeypatch.setattr(tool.requests, "get", fake_get)
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    fetched = tool.fetch_x_posts("x", "q", end - timedelta(hours=24), end)
+    assert [p["id"] for p in fetched.posts] == ["1"]
+    assert (fetched.mentions, fetched.trend, fetched.degraded) == (
+        0,
+        {"recent": 0, "previous": 0},
+        [],
+    )
+
+
 def test_query_excludes_the_bot_templates_by_name() -> None:
     """The query carries the exclusions themselves, not just the constant."""
     query = tool.build_x_query("PEPE", ADDRESS, "ethereum")

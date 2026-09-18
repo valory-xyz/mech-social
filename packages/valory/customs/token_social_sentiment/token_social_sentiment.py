@@ -45,9 +45,11 @@ Output (JSON string, always all keys):
 - token, address, chain, window_seconds: what was actually analyzed.
 - sentiment: (bullish - bearish) / (bullish + neutral + bearish), from -1 to
   1. Null (and breakdown null) when fewer than 5 on-topic items.
-- sentiment_interval: {"low": x, "high": y}, the range the score could take
-  from sampling alone (95%, from the breakdown). Two readings whose ranges
-  overlap are not different answers. Null when sentiment is null.
+- sentiment_interval: {"low": x, "high": y}, a 95% confidence interval for
+  the mean of this sample, computed from the breakdown. When two readings'
+  intervals do not overlap, the difference is likely real; overlapping
+  intervals do not show that the readings agree. It is not the range a rerun
+  would land in. Null when sentiment is null.
 - breakdown: NUMBER of on-topic sample items (posts_analyzed posts plus the
   returned headlines) that are bullish / neutral / bearish. It counts sample
   items, not `mentions`.
@@ -99,6 +101,7 @@ from typing import (
     Dict,
     List,
     Literal,
+    NamedTuple,
     Optional,
     Set,
     Tuple,
@@ -282,6 +285,34 @@ class MentionsTrend(TypedDict):
 
     recent: int
     previous: int
+
+
+class XFetch(NamedTuple):
+    """What one X search returns: the sample, the count, its trend and cost."""
+
+    posts: List[Dict[str, Any]]
+    mentions: Optional[int]
+    trend: Optional[MentionsTrend]
+    degraded: List[str]
+    cost: float
+
+
+class FetchedItems(NamedTuple):
+    """Posts and headlines kept for scoring, with the X count and trend."""
+
+    posts: List[Dict[str, Any]]
+    headlines: List[Dict[str, str]]
+    mentions: Optional[int]
+    trend: Optional[MentionsTrend]
+
+
+class BucketSpan(NamedTuple):
+    """One counts bucket clipped to the window, and its own length."""
+
+    opens: datetime
+    closes: datetime
+    matched: int
+    length: float
 
 
 class RunState(TypedDict):
@@ -727,9 +758,7 @@ def _dedupe_key(text: str) -> str:
 
 def fetch_x_posts(
     bearer: str, query: str, start_time: datetime, end_time: datetime
-) -> Tuple[
-    List[Dict[str, Any]], Optional[int], Optional[MentionsTrend], List[str], float
-]:
+) -> XFetch:
     """Fetch X posts spread over the window, the post count and its trend.
 
     A failed slice is skipped; the search only raises if every slice fails.
@@ -837,12 +866,12 @@ def fetch_x_posts(
         # the count arrived but its buckets did not: say so instead of leaving
         # a null that reads like "the window was too short"
         degraded.append("x_trend")
-    return posts, mentions, trend, degraded, cost
+    return XFetch(posts, mentions, trend, degraded, cost)
 
 
 def _bucket_span(
     bucket: Dict[str, Any], start_time: datetime, end_time: datetime
-) -> Optional[Tuple[datetime, datetime, int, float]]:
+) -> Optional[BucketSpan]:
     """Read one counts bucket, clipped to the window.
 
     :param bucket: one entry of the counts "data" list.
@@ -865,7 +894,9 @@ def _bucket_span(
         return None
     length = (closes - opens).total_seconds()
     opens, closes = max(opens, start_time), min(closes, end_time)
-    return (opens, closes, count, length) if closes > opens and length > 0 else None
+    if closes <= opens or length <= 0:
+        return None
+    return BucketSpan(opens=opens, closes=closes, matched=count, length=length)
 
 
 def _mentions_trend(
@@ -894,11 +925,10 @@ def _mentions_trend(
         span = _bucket_span(bucket, start_time, end_time)
         if span is None:
             continue
-        opens, closes, count, length = span
-        inside = (closes - opens).total_seconds()
-        in_recent = max(0.0, (closes - max(opens, middle)).total_seconds())
-        recent += count * in_recent / length
-        previous += count * (inside - in_recent) / length
+        inside = (span.closes - span.opens).total_seconds()
+        in_recent = max(0.0, (span.closes - max(span.opens, middle)).total_seconds())
+        recent += span.matched * in_recent / span.length
+        previous += span.matched * (inside - in_recent) / span.length
         covered["recent"] += in_recent
         covered["previous"] += inside - in_recent
     # per half: buckets missing from one half alone would read as a move
@@ -1413,12 +1443,7 @@ def _fetch_items(
     api_keys: Any,
     window_seconds: int,
     run_state: RunState,
-) -> Tuple[
-    List[Dict[str, Any]],
-    List[Dict[str, str]],
-    Optional[int],
-    Optional[MentionsTrend],
-]:
+) -> FetchedItems:
     """Fetch X posts and news headlines for the target.
 
     :param target: _resolve_target() result.
@@ -1491,7 +1516,7 @@ def _fetch_items(
     )
     run_state["sampled_posts"] = len(posts)
     run_state["dropped_posts"] = len(posts) - len(kept)
-    return kept, headlines, mentions, trend
+    return FetchedItems(kept, headlines, mentions, trend)
 
 
 def _sample_note(
@@ -1507,9 +1532,13 @@ def _sample_note(
     """
     if run_state["x_query"] is None:
         return []
-    matching = "an unknown number of" if mentions is None else str(mentions)
+    matching = (
+        "an unknown number of matching posts"
+        if mentions is None
+        else f"{mentions} matching post{'' if mentions == 1 else 's'}"
+    )
     return [
-        f"X search {run_state['x_query']}: {matching} matching posts, "
+        f"X search {run_state['x_query']}: {matching}, "
         f"{run_state['sampled_posts']} sampled, {run_state['dropped_posts']} "
         f"dropped as promotion, wordless posts or copies, {unscored_posts} "
         f"not on-topic."
@@ -1653,7 +1682,7 @@ def analyze(
 
 
 def sentiment_interval(breakdown: Dict[str, int]) -> Dict[str, float]:
-    """Range the score could take from sampling alone.
+    """95% confidence interval for the mean score of this sample.
 
     Each on-topic item counts +1, 0 or -1, so the score is a mean and its
     standard error comes from the breakdown. One bullish and one bearish

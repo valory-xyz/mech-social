@@ -33,9 +33,11 @@ defaults:
               Result in JSON format as a string, always with every key.
               sentiment: (bullish - bearish) / on-topic sample items, -1 to 1,
               null below 5 on-topic items.
-              sentiment_interval: {"low": x, "high": y}, the 95% range the
-              score could take from sampling alone; two readings whose ranges
-              overlap are not different answers; null when sentiment is null. breakdown: number of on-topic sample
+              sentiment_interval: {"low": x, "high": y}, a 95% confidence
+              interval for the mean of this sample: when two readings'
+              intervals do not overlap the difference is likely real, and
+              overlap does not show they agree; not the range a rerun would
+              land in; null when sentiment is null. breakdown: number of on-topic sample
               items (posts plus headlines) per class, not mentions. mentions:
               all X posts matching the search in the window, spam included
               (bot templates are excluded in the search itself).
@@ -58,7 +60,7 @@ defaults:
                 "chain": "base",
                 "window_seconds": 86400,
                 "sentiment": 0.5,
-                "sentiment_interval": {"low": 0.2, "high": 0.8},
+                "sentiment_interval": {"low": 0.07, "high": 0.93},
                 "mentions": 1250,
                 "mentions_trend": {"recent": 800, "previous": 450},
                 "posts_analyzed": 9,

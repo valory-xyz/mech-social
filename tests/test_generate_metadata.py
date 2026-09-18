@@ -67,6 +67,18 @@ def test_result_example_has_the_tool_output_keys() -> None:
     assert tuple(json.loads(result["example"])) == tool.OUTPUT_KEYS
 
 
+def test_result_example_is_consistent_with_the_tool() -> None:
+    """The published example carries the numbers the tool would compute."""
+    result = _kind_schemas()["output"]["schema"]["properties"]["result"]
+    example = json.loads(result["example"])
+    breakdown = example["breakdown"]
+    on_topic = sum(breakdown.values())
+    assert example["sentiment"] == round(
+        (breakdown["bullish"] - breakdown["bearish"]) / on_topic, 2
+    )
+    assert example["sentiment_interval"] == tool.sentiment_interval(breakdown)
+
+
 def test_tool_without_kind_fails() -> None:
     """A wire name missing from tool_kinds fails instead of getting a default."""
     registry: Dict[str, Any] = {"defaults": {}, "tool_kinds": {}}
