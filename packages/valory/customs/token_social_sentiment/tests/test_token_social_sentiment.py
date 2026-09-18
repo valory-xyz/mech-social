@@ -37,6 +37,8 @@ SOL_ADDRESS = "6twWA5PN3D3BeMmEZwoNkmKDrMLSZQxrXqcfZpvUEyz4"
 AAPL_ADDRESS = "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9"
 COPY_ADDRESS = "0x1111111111111111111111111111111111111111"
 KEYS = {"openai": "sk", "serperapi": "serper", "x_bearer": "x"}
+_TAIL = f"{tool.X_QUERY_EXCLUSIONS} -is:retweet"
+_TREND = {"recent": 10, "previous": 5}
 PEPE_PROMPT = json.dumps({"symbol": "PEPE", "address": ADDRESS})
 
 
@@ -77,7 +79,7 @@ def _search_note(
 ) -> str:
     """The X search sentence ending a result with no score."""
     return (
-        f'X search (${symbol} OR "{ADDRESS}") -is:retweet: {matching} matching '
+        f'X search (${symbol} OR "{ADDRESS}") {_TAIL}: {matching} matching '
         f"posts, {sampled} sampled, {dropped} dropped as promotion, wordless posts "
         f"or copies, {unscored} not on-topic."
     )
@@ -110,7 +112,7 @@ def stubs() -> Any:
         patch.object(tool, "search_ticker", return_value=[]) as search,
         patch.object(tool, "symbol_volumes", return_value={}) as volumes,
         patch.object(
-            tool, "fetch_x_posts", return_value=(_posts(8), 1830, [], 0.0)
+            tool, "fetch_x_posts", return_value=(_posts(8), 1830, _TREND, [], 0.0)
         ) as x_posts,
         patch.object(tool, "fetch_headlines", return_value=_headlines(2)) as news,
         patch.object(tool, "score_sentiment", return_value=labels) as score,
@@ -166,7 +168,7 @@ def test_post_text_cleaned_before_scoring(stubs: Dict[str, MagicMock]) -> None:
     """URLs, HTML entities and the target address are removed from sent text."""
     posts = _posts(1)
     posts[0]["text"] = f"buy &amp; hold {ADDRESS.upper()} https://t.co/x"
-    stubs["x"].return_value = (posts, 1, [], 0.0)
+    stubs["x"].return_value = (posts, 1, _TREND, [], 0.0)
     _run(PEPE_PROMPT)
     assert stubs["score"].call_args.args[3][0]["text"] == "buy & hold [CA]"
 
@@ -391,7 +393,7 @@ def test_shared_ticker_without_chain_uses_address(stubs: Dict[str, MagicMock]) -
     }
     stubs["volumes"].return_value = {"0xother": 500.0}
     result = _run(json.dumps({"symbol": "FUN", "address": ADDRESS}))
-    assert stubs["x"].call_args.args[1] == f'("{ADDRESS}") -is:retweet'
+    assert stubs["x"].call_args.args[1] == f'("{ADDRESS}") {_TAIL}'
     assert stubs["news"].call_args.args[1] == f'"{ADDRESS}"'
     assert "searched by contract address only" in result["reasoning"]
 
@@ -443,7 +445,7 @@ def test_news_failing_while_x_works(stubs: Dict[str, MagicMock]) -> None:
 
 def test_x_partial_and_counts_degradation_reported(stubs: Dict[str, MagicMock]) -> None:
     """Degraded sources from the X fetch reach the output."""
-    stubs["x"].return_value = (_posts(8), None, ["x_partial", "x_counts"], 0.0)
+    stubs["x"].return_value = (_posts(8), None, _TREND, ["x_partial", "x_counts"], 0.0)
     result = _run(PEPE_PROMPT)
     assert result["degraded_sources"] == ["x_partial", "x_counts"]
     assert result["mentions"] is None
@@ -485,7 +487,7 @@ def test_both_sources_failing(stubs: Dict[str, MagicMock]) -> None:
 
 def test_no_data_is_not_an_error(stubs: Dict[str, MagicMock]) -> None:
     """No posts and no news gives null sentiment, empty lists, no LLM call."""
-    stubs["x"].return_value = ([], 0, [], 0.0)
+    stubs["x"].return_value = ([], 0, _TREND, [], 0.0)
     stubs["news"].return_value = []
     result = _run(json.dumps({"symbol": "NEWTOKEN", "address": ADDRESS}))
     assert result["error"] is None
@@ -501,7 +503,7 @@ def test_no_data_is_not_an_error(stubs: Dict[str, MagicMock]) -> None:
 
 def test_no_data_with_unknown_mentions(stubs: Dict[str, MagicMock]) -> None:
     """A missing X count is worded as unknown in the search note."""
-    stubs["x"].return_value = ([], None, ["x_counts"], 0.0)
+    stubs["x"].return_value = ([], None, _TREND, ["x_counts"], 0.0)
     stubs["news"].return_value = []
     result = _run(PEPE_PROMPT)
     assert result["reasoning"] == (
@@ -554,7 +556,7 @@ def test_min_on_topic_boundary_scores(stubs: Dict[str, MagicMock]) -> None:
 
 def test_large_sample_has_no_small_sample_note(stubs: Dict[str, MagicMock]) -> None:
     """Ten or more on-topic items are not flagged as a small sample."""
-    stubs["x"].return_value = (_posts(12), 50, [], 0.0)
+    stubs["x"].return_value = (_posts(12), 50, _TREND, [], 0.0)
     stubs["score"].return_value = _labels(bullish=[f"p{i}" for i in range(1, 11)])
     result = _run(PEPE_PROMPT)
     assert "Based on only" not in result["reasoning"]
@@ -693,6 +695,19 @@ def _x_response(data: Any = None, meta: Any = None) -> MagicMock:
     return response
 
 
+def _buckets(start: datetime, hours: int, count: int = 10) -> List[Dict[str, Any]]:
+    """Clock-aligned hourly counts buckets covering a window."""
+    first = start.replace(minute=0, second=0, microsecond=0)
+    return [
+        {
+            "start": (first + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "end": (first + timedelta(hours=i + 1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "tweet_count": count,
+        }
+        for i in range(hours + 1)
+    ]
+
+
 def test_fetch_x_posts_slices_window_and_filters(monkeypatch: Any) -> None:
     """Window split in X_SLICES; near-duplicates and ticker lists dropped."""
     pages = [
@@ -709,16 +724,19 @@ def test_fetch_x_posts_slices_window_and_filters(monkeypatch: Any) -> None:
         [],
     ]
     calls: List[Dict[str, Any]] = []
+    end = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
 
     def fake_get(url: str, params: Dict[str, Any], **_: Any) -> Any:
         calls.append({"url": url, **params})
         if url == tool.X_COUNTS_URL:
-            return _x_response(meta={"total_tweet_count": 77})
+            return _x_response(
+                data=_buckets(end - timedelta(hours=24), 24, count=3),
+                meta={"total_tweet_count": 77},
+            )
         return _x_response(data=pages[len(calls) - 1])
 
     monkeypatch.setattr(tool.requests, "get", fake_get)
-    end = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
-    posts, mentions, degraded, cost = tool.fetch_x_posts(
+    posts, mentions, trend, degraded, cost = tool.fetch_x_posts(
         "x", "q", end - timedelta(hours=24), end
     )
     assert [p["id"] for p in posts] == ["1", "4"]
@@ -753,8 +771,8 @@ def test_fetch_x_posts_keeps_posts_when_a_slice_fails(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(tool.requests, "get", fake_get)
     end = datetime(2026, 9, 16, tzinfo=timezone.utc)
-    posts, mentions, degraded, cost = tool.fetch_x_posts(
-        "x", "q", end - timedelta(hours=4), end
+    posts, mentions, trend, degraded, cost = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=2), end
     )
     assert [p["id"] for p in posts] == ["1", "2", "4"]
     assert mentions == 9
@@ -775,7 +793,7 @@ def test_fetch_x_posts_counts_missing_is_degraded(monkeypatch: Any, meta: Any) -
 
     monkeypatch.setattr(tool.requests, "get", fake_get)
     end = datetime(2026, 9, 16, tzinfo=timezone.utc)
-    posts, mentions, degraded, cost = tool.fetch_x_posts(
+    posts, mentions, trend, degraded, cost = tool.fetch_x_posts(
         "x", "q", end - timedelta(hours=1), end
     )
     assert len(posts) == 1
@@ -783,6 +801,183 @@ def test_fetch_x_posts_counts_missing_is_degraded(monkeypatch: Any, meta: Any) -
     assert degraded == ["x_counts"]
     counts_cost = 0.0 if meta is None else tool.X_COUNTS_REQUEST_USD
     assert cost == pytest.approx(4 * tool.X_POST_READ_USD + counts_cost)
+
+
+def test_fetch_x_posts_counts_hourly_and_splits_the_trend(monkeypatch: Any) -> None:
+    """The counts request is hourly and its buckets become the mentions trend."""
+    end = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+    buckets = _buckets(end - timedelta(hours=24), 24, count=0)
+    for bucket in buckets[12:24]:
+        bucket["tweet_count"] = 10
+    calls: List[Dict[str, Any]] = []
+
+    def fake_get(url: str, params: Dict[str, Any], **_: Any) -> Any:
+        calls.append({"url": url, **params})
+        if url == tool.X_COUNTS_URL:
+            return _x_response(data=buckets, meta={"total_tweet_count": 120})
+        return _x_response(
+            data=[{"id": str(len(calls)), "text": f"hi $PEPE {len(calls)}"}]
+        )
+
+    monkeypatch.setattr(tool.requests, "get", fake_get)
+    _, mentions, trend, degraded, _ = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=24), end
+    )
+    assert mentions == 120
+    assert trend == {"recent": 120, "previous": 0}
+    assert not degraded
+    assert [c["granularity"] for c in calls if c["url"] == tool.X_COUNTS_URL] == [
+        "hour"
+    ]
+
+
+@pytest.mark.parametrize("offset", [0, 7, 23, 59])
+def test_mentions_trend_is_not_biased_by_the_clock(offset: int) -> None:
+    """A flat posting rate reads flat whatever minute the window ends on."""
+    end = datetime(2026, 9, 16, 12, offset, tzinfo=timezone.utc)
+    start = end - timedelta(hours=24)
+    trend = tool._mentions_trend(_buckets(start, 24), start, end)
+    assert trend is not None
+    assert abs(trend["recent"] - trend["previous"]) <= 1
+
+
+@pytest.mark.parametrize(
+    "buckets,window_hours",
+    [(None, 24), ([], 24), ("nope", 24), ("full", 3)],
+)
+def test_mentions_trend_needs_a_window_and_buckets(
+    buckets: Any, window_hours: int
+) -> None:
+    """Too short a window or unusable buckets give no trend instead of a guess."""
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    start = end - timedelta(hours=window_hours)
+    data = _buckets(start, window_hours) if buckets == "full" else buckets
+    assert tool._mentions_trend(data, start, end) is None
+
+
+def test_mentions_trend_skips_one_bad_bucket_but_needs_coverage() -> None:
+    """A malformed bucket is skipped; too few usable ones drop the trend."""
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    start = end - timedelta(hours=24)
+    buckets = _buckets(start, 24)
+    buckets[0] = {"start": "nonsense", "tweet_count": 10}
+    trend = tool._mentions_trend(buckets, start, end)
+    assert trend is not None and trend["recent"] > 0
+    assert tool._mentions_trend(buckets[:8], start, end) is None
+
+
+def test_unusable_buckets_are_a_degraded_source(monkeypatch: Any) -> None:
+    """A count without usable buckets says so instead of a silent null trend."""
+
+    def fake_get(url: str, **_: Any) -> Any:
+        if url == tool.X_COUNTS_URL:
+            return _x_response(
+                data=[{"start": "nonsense"}], meta={"total_tweet_count": 42}
+            )
+        return _x_response(data=[{"id": "1", "text": "hi $PEPE"}])
+
+    monkeypatch.setattr(tool.requests, "get", fake_get)
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    _, mentions, trend, degraded, _ = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=24), end
+    )
+    assert (mentions, trend, degraded) == (42, None, ["x_trend"])
+
+
+def test_short_window_without_buckets_is_not_degraded(monkeypatch: Any) -> None:
+    """Under MIN_TREND_HOURS a null trend is expected, not a failure."""
+
+    def fake_get(url: str, **_: Any) -> Any:
+        if url == tool.X_COUNTS_URL:
+            return _x_response(data=[], meta={"total_tweet_count": 7})
+        return _x_response(data=[{"id": "1", "text": "hi $PEPE"}])
+
+    monkeypatch.setattr(tool.requests, "get", fake_get)
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    _, _, trend, degraded, _ = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=1), end
+    )
+    assert trend is None and degraded == []
+
+
+def test_zero_matching_posts_give_a_zero_trend(monkeypatch: Any) -> None:
+    """A window nothing matched reports zeros, not a missing trend."""
+
+    def fake_get(url: str, **_: Any) -> Any:
+        if url == tool.X_COUNTS_URL:
+            return _x_response(data=[], meta={"total_tweet_count": 0})
+        return _x_response(data=[])
+
+    monkeypatch.setattr(tool.requests, "get", fake_get)
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    _, mentions, trend, degraded, _ = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=24), end
+    )
+    assert (mentions, trend, degraded) == (0, {"recent": 0, "previous": 0}, [])
+
+
+def test_zero_matching_posts_in_a_short_window_stay_null(monkeypatch: Any) -> None:
+    """Under MIN_TREND_HOURS the window rule wins: no trend, no flag."""
+
+    def fake_get(url: str, **_: Any) -> Any:
+        if url == tool.X_COUNTS_URL:
+            return _x_response(data=[], meta={"total_tweet_count": 0})
+        return _x_response(data=[])
+
+    monkeypatch.setattr(tool.requests, "get", fake_get)
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    _, mentions, trend, degraded, _ = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=1), end
+    )
+    assert (mentions, trend, degraded) == (0, None, [])
+
+
+def test_trend_needs_buckets_in_both_halves() -> None:
+    """Buckets missing from one half alone drop the trend instead of reading as a move."""
+    end = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+    start = end - timedelta(hours=24)
+    buckets = _buckets(start, 24)
+    for bucket in buckets[:8]:
+        bucket["tweet_count"] = "nonsense"
+    assert tool._mentions_trend(buckets, start, end) is None
+
+
+def test_trend_halves_add_up_to_the_rounded_total() -> None:
+    """The two halves always sum to the rounded total, off the hour included."""
+    end = datetime(2026, 9, 16, 12, 37, tzinfo=timezone.utc)
+    start = end - timedelta(hours=5)
+    buckets = _buckets(start, 5, count=5)
+    trend = tool._mentions_trend(buckets, start, end)
+    assert trend is not None
+    assert trend["recent"] + trend["previous"] == round(
+        sum(
+            b["tweet_count"]
+            * (
+                min(datetime.fromisoformat(b["end"].replace("Z", "+00:00")), end)
+                - max(datetime.fromisoformat(b["start"].replace("Z", "+00:00")), start)
+            ).total_seconds()
+            / 3600
+            for b in buckets
+            if max(datetime.fromisoformat(b["start"].replace("Z", "+00:00")), start)
+            < min(datetime.fromisoformat(b["end"].replace("Z", "+00:00")), end)
+        )
+    )
+
+
+def test_trend_degradation_reaches_the_output(stubs: Dict[str, MagicMock]) -> None:
+    """x_trend and its note reach degraded_sources and reasoning."""
+    stubs["x"].return_value = (_posts(8), 1830, None, ["x_trend"], 0.0)
+    result = _run(PEPE_PROMPT)
+    assert result["degraded_sources"] == ["x_trend"]
+    assert result["mentions_trend"] is None
+    assert "X post count lacks usable hourly buckets; no trend." in result["reasoning"]
+
+
+def test_query_excludes_the_bot_templates_by_name() -> None:
+    """The query carries the exclusions themselves, not just the constant."""
+    query = tool.build_x_query("PEPE", ADDRESS, "ethereum")
+    for term in ('-"watch update"', '-"detect paid"', '-"CA:"'):
+        assert term in query
 
 
 def test_fetch_x_posts_all_slices_failing_raises(monkeypatch: Any) -> None:
@@ -798,16 +993,16 @@ def test_fetch_x_posts_all_slices_failing_raises(monkeypatch: Any) -> None:
 @pytest.mark.parametrize(
     "symbol,address,chain,narrow,expected",
     [
-        ("PEPE", None, None, False, "($PEPE) -is:retweet"),
-        ("PEPE", ADDRESS, "ethereum", False, f'($PEPE OR "{ADDRESS}") -is:retweet'),
+        ("PEPE", None, None, False, f"($PEPE) {_TAIL}"),
+        ("PEPE", ADDRESS, "ethereum", False, f'($PEPE OR "{ADDRESS}") {_TAIL}'),
         (
             "FUN",
             ADDRESS,
             "robinhood",
             True,
-            f'(($FUN "robinhood") OR "{ADDRESS}") -is:retweet',
+            f'(($FUN "robinhood") OR "{ADDRESS}") {_TAIL}',
         ),
-        ("FUN", ADDRESS, None, True, f'("{ADDRESS}") -is:retweet'),
+        ("FUN", ADDRESS, None, True, f'("{ADDRESS}") {_TAIL}'),
     ],
 )
 def test_build_x_query(
@@ -985,7 +1180,7 @@ def test_promo_posts_dropped_before_scoring(stubs: Dict[str, MagicMock]) -> None
     """Promo posts never reach the LLM."""
     posts = _posts(3)
     posts[1]["text"] = "join https://t.me/x"
-    stubs["x"].return_value = (posts, 3, [], 0.0)
+    stubs["x"].return_value = (posts, 3, _TREND, [], 0.0)
     _run(PEPE_PROMPT)
     sent = stubs["score"].call_args.args[3]
     assert [p["id"] for p in sent] == ["100", "102"]
@@ -1069,7 +1264,7 @@ def test_wordless_posts_dropped_before_scoring(stubs: Dict[str, MagicMock]) -> N
     """Posts without words never reach the LLM."""
     posts = _posts(3)
     posts[1]["text"] = f"@user robinhood:{ADDRESS}"
-    stubs["x"].return_value = (posts, 3, [], 0.0)
+    stubs["x"].return_value = (posts, 3, _TREND, [], 0.0)
     _run(PEPE_PROMPT)
     assert [p["id"] for p in stubs["score"].call_args.args[3]] == ["100", "102"]
 
@@ -1110,7 +1305,7 @@ def test_established_shared_ticker_is_not_narrowed(stubs: Dict[str, MagicMock]) 
 
 def test_x_partial_and_counts_notes(stubs: Dict[str, MagicMock]) -> None:
     """Partial X failures and missing counts are also explained in reasoning."""
-    stubs["x"].return_value = (_posts(8), None, ["x_partial", "x_counts"], 0.0)
+    stubs["x"].return_value = (_posts(8), None, _TREND, ["x_partial", "x_counts"], 0.0)
     result = _run(PEPE_PROMPT)
     assert "Some X time slices failed" in result["reasoning"]
     assert "X post count unavailable." in result["reasoning"]
@@ -1209,7 +1404,7 @@ def test_waves_dropped_before_scoring(stubs: Dict[str, MagicMock]) -> None:
     posts = _posts(5)
     for i in (1, 2, 4):
         posts[i]["text"] = f"THIS TICKER WORTH TO BUY $PEPE CTO strong community {i}"
-    stubs["x"].return_value = (posts, 5, [], 0.0)
+    stubs["x"].return_value = (posts, 5, _TREND, [], 0.0)
     _run(PEPE_PROMPT)
     assert [p["id"] for p in stubs["score"].call_args.args[3]] == ["100", "103"]
 
@@ -1293,7 +1488,7 @@ def test_stock_token_counts_the_underlying_stock(stubs: Dict[str, MagicMock]) ->
     stubs["volumes"].return_value = {"0xmeme": 10**6, AAPL_ADDRESS.lower(): 10.0}
     result = _run(json.dumps({"address": AAPL_ADDRESS}))
     stubs["search"].assert_called_once_with("NVDA")
-    assert stubs["x"].call_args.args[1] == f'($NVDA OR "{AAPL_ADDRESS}") -is:retweet'
+    assert stubs["x"].call_args.args[1] == f'($NVDA OR "{AAPL_ADDRESS}") {_TAIL}'
     assert stubs["news"].call_args.args[1] == '"NVDA" stock'
     assert result["degraded_sources"] == []
     assert result["reasoning"] == (
@@ -1349,7 +1544,7 @@ def test_stock_named_token_without_clean_symbol_is_not_a_stock(
     stubs["resolve"].return_value = {**STOCK_INFO, "symbol": None}
     result = _run(json.dumps({"address": AAPL_ADDRESS}))
     stubs["search"].assert_not_called()
-    assert stubs["x"].call_args.args[1] == f'("{AAPL_ADDRESS}") -is:retweet'
+    assert stubs["x"].call_args.args[1] == f'("{AAPL_ADDRESS}") {_TAIL}'
     assert "Tokenized" not in result["reasoning"]
 
 
@@ -1365,7 +1560,7 @@ def test_source_cost_reported_to_counter_callback(
     stubs: Dict[str, MagicMock], news_fails: bool
 ) -> None:
     """X and Serper cost reach the mech callback as a call with no tokens."""
-    stubs["x"].return_value = (_posts(8), 1830, [], 0.205)
+    stubs["x"].return_value = (_posts(8), 1830, _TREND, [], 0.205)
     if news_fails:
         stubs["news"].side_effect = requests.ConnectionError("down")
     callback = MagicMock()
@@ -1381,7 +1576,7 @@ def test_source_cost_reported_to_counter_callback(
 def test_no_source_cost_no_callback_call(stubs: Dict[str, MagicMock]) -> None:
     """Nothing billed (no keys for X or Serper): no cost call."""
     callback = MagicMock()
-    stubs["x"].return_value = ([], None, [], 0.0)
+    stubs["x"].return_value = ([], None, _TREND, [], 0.0)
     result = _run(
         PEPE_PROMPT, keys={"openai": "sk", "x_bearer": "x"}, counter_callback=callback
     )
@@ -1482,7 +1677,9 @@ def test_counts_http_error_is_not_billed(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(tool.requests, "get", fake_get)
     end = datetime(2026, 9, 16, tzinfo=timezone.utc)
-    _, mentions, _, cost = tool.fetch_x_posts("x", "q", end - timedelta(hours=1), end)
+    _, mentions, _, _, cost = tool.fetch_x_posts(
+        "x", "q", end - timedelta(hours=1), end
+    )
     assert mentions is None
     assert cost == pytest.approx(4 * tool.X_POST_READ_USD)
 
@@ -1491,7 +1688,7 @@ def test_cost_reporting_failure_does_not_fail_the_request(
     stubs: Dict[str, MagicMock],
 ) -> None:
     """A callback that rejects call_cost only loses the cost report."""
-    stubs["x"].return_value = (_posts(8), 1830, [], 0.205)
+    stubs["x"].return_value = (_posts(8), 1830, _TREND, [], 0.205)
     callback = MagicMock(side_effect=TypeError("unexpected keyword call_cost"))
     result = _run(PEPE_PROMPT, counter_callback=callback)
     assert result["error"] is None
@@ -1631,7 +1828,7 @@ def test_all_posts_dropped_is_noted(stubs: Dict[str, MagicMock]) -> None:
     posts = _posts(3)
     for post in posts:
         post["text"] = "join our group https://t.me/pepepump"
-    stubs["x"].return_value = (posts, 250, [], 0.0)
+    stubs["x"].return_value = (posts, 250, _TREND, [], 0.0)
     stubs["news"].return_value = []
     result = _run(PEPE_PROMPT)
     assert result["sentiment"] is None
@@ -1647,7 +1844,7 @@ def test_all_posts_dropped_without_news_search(stubs: Dict[str, MagicMock]) -> N
     posts = _posts(3)
     for post in posts:
         post["text"] = "join our group https://t.me/pepepump"
-    stubs["x"].return_value = (posts, 250, [], 0.0)
+    stubs["x"].return_value = (posts, 250, _TREND, [], 0.0)
     result = _run(PEPE_PROMPT, keys={"openai": "sk", "x_bearer": "x"})
     assert result["reasoning"] == (f"news unavailable. {_search_note('250', 3, 3, 0)}")
 
@@ -1659,7 +1856,7 @@ def test_all_posts_dropped_is_noted_when_news_is_scored(
     posts = _posts(3)
     for post in posts:
         post["text"] = "join our group https://t.me/pepepump"
-    stubs["x"].return_value = (posts, 250, [], 0.0)
+    stubs["x"].return_value = (posts, 250, _TREND, [], 0.0)
     stubs["news"].return_value = _headlines(6)
     stubs["score"].return_value = _labels(bullish=["n1", "n2", "n3", "n4", "n5"])
     result = _run(PEPE_PROMPT)
@@ -1674,7 +1871,7 @@ def test_all_posts_dropped_and_too_few_headlines_states_dropped_once(
     posts = _posts(3)
     for post in posts:
         post["text"] = "join our group https://t.me/pepepump"
-    stubs["x"].return_value = (posts, 250, [], 0.0)
+    stubs["x"].return_value = (posts, 250, _TREND, [], 0.0)
     stubs["news"].return_value = _headlines(2)
     stubs["score"].return_value = _labels(bullish=["n1"])
     result = _run(PEPE_PROMPT)
