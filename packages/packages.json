@@ -1,8 +1,8 @@
 {
     "dev": {
         "custom/valory/token_social_sentiment/0.1.0": "bafybeigwj43p2i3c6koywhgg4cqu7qhk7i5h362ond3qw6ggmtuqa6jjwe",
-        "agent/valory/mech_social/0.1.0": "bafybeial5tpmsnsesx6iyst52vcr65ropt7svqmk4lprhcprbmfigm2npu",
-        "service/valory/mech_social/0.1.0": "bafybeihtu4fl76bwz5at5hmbwdfxfyd7f54mtxetyg7kyfjnajkhjxuf2m"
+        "agent/valory/mech_social/0.1.0": "bafybeicj6mjwzhfqndvmz47slgipqwxafifoteqb5vnmefya4pnt7fgmmm",
+        "service/valory/mech_social/0.1.0": "bafybeib35hdetcs6b6nrydub3ow2akzetzrecvwddratq3lhzkzzdetltq"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",
@@ -43,8 +43,8 @@
         "skill/valory/reset_pause_abci/0.1.0": "bafybeifrnmlscfiki7wojs6zasppefupd2wkjyq6orhdllfppjud7isrxi",
         "skill/valory/termination_abci/0.1.0": "bafybeih6sa2ttcvvjk7rcfn7ure2ws23kcfufssb4qmluzcfvednkfpvoi",
         "skill/valory/delivery_rate_abci/0.1.0": "bafybeifjiazvf3qhr2264i55u4tlvmyf6ztgak2ndqolujt4kw6jiy7l3m",
-        "skill/valory/mech_abci/0.1.0": "bafybeigazj3f7byohtdxcah34znlfis7o4xrizfxqapvbgrhxmysyx22pa",
-        "skill/valory/task_execution/0.1.0": "bafybeifplbillwkoiq4g6ofo6xsrlbafvmtepdq6evszaymfwgb3xshafy",
-        "skill/valory/task_submission_abci/0.1.0": "bafybeiaeaojq66oo2jxlawc6b3i4wdcalbaddnwpmnucm2ilogna2wzqwi"
+        "skill/valory/mech_abci/0.1.0": "bafybeigpn3tp4aaizeofa3kyyggjxkuikpwkokbd2rsojh3izcw4axzy3y",
+        "skill/valory/task_execution/0.1.0": "bafybeiefkyqpqejppw7r6ux2syowx3273wjj4imamvxcz6qpogvoahnbmq",
+        "skill/valory/task_submission_abci/0.1.0": "bafybeigkgdnvw4bclz7qinskzn6f3yyrkj53f6faida6nhzoovzhuyee4e"
     }
 }
