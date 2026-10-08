@@ -224,30 +224,6 @@ def build_operator(
     return operator
 
 
-def parse_benchmark_value(raw: str) -> Tuple[str, float]:
-    """Parse a TOOL=VALUE pair; VALUE must lie within 0..1."""
-    tool, sep, value_text = raw.partition("=")
-    if not sep or not tool:
-        raise argparse.ArgumentTypeError(f"expected TOOL=VALUE, got {raw!r}")
-    try:
-        value = float(value_text)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(f"{raw!r}: value is not a number") from e
-    if not 0.0 <= value <= 1.0:
-        raise argparse.ArgumentTypeError(f"{raw!r}: value must be within 0..1")
-    return tool, value
-
-
-def parse_benchmark_values(values: List[Tuple[str, float]]) -> Dict[str, float]:
-    """Map each tool to its value; a tool given twice is an error."""
-    by_tool: Dict[str, float] = {}
-    for tool, value in values:
-        if tool in by_tool:
-            raise ValueError(f"--benchmark-value given twice for '{tool}'")
-        by_tool[tool] = value
-    return by_tool
-
-
 def is_https_url(url: str) -> bool:
     """Return True for an https:// URL with a host and no whitespace."""
     if any(char.isspace() for char in url):
@@ -257,14 +233,11 @@ def is_https_url(url: str) -> bool:
 
 
 def build_benchmark(
-    metric: Optional[str],
-    window: Optional[str],
-    url: Optional[str],
-    values: Dict[str, float],
+    metric: Optional[str], window: Optional[str], url: Optional[str]
 ) -> Optional[Dict[str, str]]:
-    """Return the benchmark fields shared by every tool, or None when none was asked for."""
+    """Return the benchmark link shared by every tool, or None when none was asked for."""
     if url is None:
-        if metric is not None or window is not None or values:
+        if metric is not None or window is not None:
             raise ValueError(
                 "--benchmark-url is required when any other --benchmark-* flag is given"
             )
@@ -285,25 +258,13 @@ def build_benchmark(
 
 
 def attach_benchmarks(
-    metadata: Dict[str, Any],
-    benchmark: Optional[Dict[str, str]],
-    values: Dict[str, float],
+    metadata: Dict[str, Any], benchmark: Optional[Dict[str, str]]
 ) -> None:
-    """Give every tool the shared benchmark, with its value when one was given."""
+    """Give every tool the shared benchmark link; the live figure is behind its url."""
     if benchmark is None:
         return
-    unknown = set(values) - set(metadata["toolMetadata"])
-    if unknown:
-        raise ValueError(
-            f"--benchmark-value names tools missing from the output: {sorted(unknown)}"
-        )
-    for tool, entry in metadata["toolMetadata"].items():
-        fields: Dict[str, Any] = {"metric": benchmark["metric"]}
-        if tool in values:
-            fields["value"] = values[tool]
-        fields["window"] = benchmark["window"]
-        fields["url"] = benchmark["url"]
-        entry["benchmark"] = fields
+    for entry in metadata["toolMetadata"].values():
+        entry["benchmark"] = dict(benchmark)
 
 
 def build_template(args: argparse.Namespace) -> Dict[str, Any]:
@@ -363,14 +324,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--operator-contact", type=str, default=None, help="Operator contact."
     )
     parser.add_argument(
-        "--benchmark-value",
-        action="append",
-        default=[],
-        type=parse_benchmark_value,
-        metavar="TOOL=VALUE",
-        help="Snapshot value (0..1) for one tool (repeatable); the url is the live figure.",
-    )
-    parser.add_argument(
         "--benchmark-metric",
         type=str,
         default=None,
@@ -404,15 +357,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
 
     template = build_template(args)
-    values = parse_benchmark_values(args.benchmark_value)
     benchmark = build_benchmark(
-        args.benchmark_metric, args.benchmark_window, args.benchmark_url, values
+        args.benchmark_metric, args.benchmark_window, args.benchmark_url
     )
     registry = load_schema_registry(args.schema_registry)
     tools_data = generate_tools_data(args.packages_root)
 
     metadata = build_tools_metadata(tools_data, registry, template, args.skip_tool)
-    attach_benchmarks(metadata, benchmark, values)
+    attach_benchmarks(metadata, benchmark)
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=4)
     print(f"Metadata has been stored to {args.output}")

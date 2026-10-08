@@ -396,10 +396,10 @@ def test_operator_domain_accepts_lowercase_bare_hostnames(
     assert metadata["operator"]["domain"] == domain
 
 
-def test_benchmark_url_and_window_alone_give_every_tool_a_benchmark(
+def test_benchmark_url_and_window_give_every_tool_the_same_link(
     tmp_path: Path,
 ) -> None:
-    """The url is the live figure, so no per-tool value is needed to emit a benchmark."""
+    """The benchmark is a link to the live figure, identical for every tool of the mech."""
     metadata = _generate(
         tmp_path, *BASE_ARGS, *BENCHMARK_ARGS, tools=(SAMPLE_TOOL, OTHER_TOOL)
     )
@@ -411,18 +411,12 @@ def test_benchmark_url_and_window_alone_give_every_tool_a_benchmark(
             "window": "30d",
             "url": SAMPLE_BENCHMARK_URL,
         }
+        assert "value" not in benchmark
 
 
 def test_tool_entry_keeps_schema_fields_alongside_benchmark(tmp_path: Path) -> None:
     """A benchmark is added to the tool entry without displacing its schema fields."""
-    metadata = _generate(
-        tmp_path,
-        *BASE_ARGS,
-        *BENCHMARK_ARGS,
-        "--benchmark-value",
-        f"{SAMPLE_TOOL}=0.83",
-        tools=(SAMPLE_TOOL,),
-    )
+    metadata = _generate(tmp_path, *BASE_ARGS, *BENCHMARK_ARGS, tools=(SAMPLE_TOOL,))
     entry = metadata["toolMetadata"][SAMPLE_TOOL]
     assert metadata["tools"] == [SAMPLE_TOOL]
     assert set(entry) == {*TOOL_SCHEMA_FIELDS, "benchmark"}
@@ -430,13 +424,7 @@ def test_tool_entry_keeps_schema_fields_alongside_benchmark(tmp_path: Path) -> N
     assert entry["description"] == TOOL_DESCRIPTION
     assert entry["input"] == {"type": "text"}
     assert entry["output"] == {}
-    assert list(entry["benchmark"]) == ["metric", "value", "window", "url"]
-    assert entry["benchmark"] == {
-        "metric": generate_metadata.DEFAULT_BENCHMARK_METRIC,
-        "value": 0.83,
-        "window": "30d",
-        "url": SAMPLE_BENCHMARK_URL,
-    }
+    assert list(entry["benchmark"]) == ["metric", "window", "url"]
 
 
 def test_benchmark_metric_flag_overrides_the_default(tmp_path: Path) -> None:
@@ -466,97 +454,6 @@ def test_blank_benchmark_metric_is_rejected(tmp_path: Path, metric: str) -> None
         )
 
 
-def test_tool_without_a_value_gets_the_benchmark_without_a_value_key(
-    tmp_path: Path,
-) -> None:
-    """Only tools that were given a value carry one; the others still carry the link."""
-    metadata = _generate(
-        tmp_path,
-        *BASE_ARGS,
-        *BENCHMARK_ARGS,
-        "--benchmark-value",
-        f"{SAMPLE_TOOL}=0.83",
-        tools=(SAMPLE_TOOL, OTHER_TOOL),
-    )
-    assert metadata["toolMetadata"][SAMPLE_TOOL]["benchmark"]["value"] == 0.83
-    other = metadata["toolMetadata"][OTHER_TOOL]["benchmark"]
-    assert "value" not in other
-    assert other["url"] == SAMPLE_BENCHMARK_URL
-
-
-def test_benchmark_value_for_a_tool_missing_from_the_output_raises(
-    tmp_path: Path,
-) -> None:
-    """A mistyped or skipped tool name fails loudly instead of dropping the value."""
-    with pytest.raises(ValueError, match="missing from the output"):
-        _generate(
-            tmp_path,
-            *BASE_ARGS,
-            *BENCHMARK_ARGS,
-            "--benchmark-value",
-            f"{OTHER_TOOL}=0.83",
-            tools=(SAMPLE_TOOL,),
-        )
-
-
-def test_benchmark_value_given_twice_for_one_tool_raises(tmp_path: Path) -> None:
-    """Two values for one tool is ambiguous; neither silently wins."""
-    with pytest.raises(ValueError, match="given twice"):
-        _generate(
-            tmp_path,
-            *BASE_ARGS,
-            *BENCHMARK_ARGS,
-            "--benchmark-value",
-            f"{SAMPLE_TOOL}=0.8",
-            "--benchmark-value",
-            f"{SAMPLE_TOOL}=0.9",
-            tools=(SAMPLE_TOOL,),
-        )
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        f"{SAMPLE_TOOL}=-0.1",
-        f"{SAMPLE_TOOL}=1.01",
-        f"{SAMPLE_TOOL}=nan",
-        f"{SAMPLE_TOOL}=high",
-        f"{SAMPLE_TOOL}=",
-        SAMPLE_TOOL,
-        "=0.5",
-    ],
-)
-def test_benchmark_value_must_be_tool_equals_unit_interval(
-    tmp_path: Path, raw: str
-) -> None:
-    """Anything but TOOL=<number in 0..1> is a usage error."""
-    with pytest.raises(SystemExit):
-        _generate(
-            tmp_path,
-            *BASE_ARGS,
-            *BENCHMARK_ARGS,
-            "--benchmark-value",
-            raw,
-            tools=(SAMPLE_TOOL,),
-        )
-
-
-@pytest.mark.parametrize("value", ["0", "1", "0.5"])
-def test_benchmark_value_accepts_the_unit_interval_bounds(
-    tmp_path: Path, value: str
-) -> None:
-    """0 and 1 are valid values, not off-by-one rejections; a measured zero is written."""
-    metadata = _generate(
-        tmp_path,
-        *BASE_ARGS,
-        *BENCHMARK_ARGS,
-        "--benchmark-value",
-        f"{SAMPLE_TOOL}={value}",
-        tools=(SAMPLE_TOOL,),
-    )
-    assert metadata["toolMetadata"][SAMPLE_TOOL]["benchmark"]["value"] == float(value)
-
-
 def test_benchmark_window_rejects_unknown_values(tmp_path: Path) -> None:
     """The window is one of the spec's four literals."""
     with pytest.raises(SystemExit):
@@ -568,8 +465,7 @@ def test_benchmark_window_rejects_unknown_values(tmp_path: Path) -> None:
     [
         ("--benchmark-window", "30d"),
         ("--benchmark-metric", "brier"),
-        ("--benchmark-value", f"{SAMPLE_TOOL}=0.5"),
-        ("--benchmark-window", "30d", "--benchmark-value", f"{SAMPLE_TOOL}=0.5"),
+        ("--benchmark-window", "30d", "--benchmark-metric", "brier"),
     ],
 )
 def test_benchmark_flags_without_url_are_an_error(
@@ -578,6 +474,19 @@ def test_benchmark_flags_without_url_are_an_error(
     """A benchmark flag that cannot reach the output is an error, not ignored."""
     with pytest.raises(ValueError, match="--benchmark-url is required"):
         _generate(tmp_path, *BASE_ARGS, *flags, tools=(SAMPLE_TOOL,))
+
+
+def test_benchmark_value_flag_is_not_accepted(tmp_path: Path) -> None:
+    """A fixed figure goes stale between republishes; only the link is published."""
+    with pytest.raises(SystemExit):
+        _generate(
+            tmp_path,
+            *BASE_ARGS,
+            *BENCHMARK_ARGS,
+            "--benchmark-value",
+            f"{SAMPLE_TOOL}=0.83",
+            tools=(SAMPLE_TOOL,),
+        )
 
 
 def test_benchmark_url_without_window_is_an_error(tmp_path: Path) -> None:
@@ -633,8 +542,6 @@ def test_regenerated_manifest_keeps_every_spec_field(tmp_path: Path) -> None:
         "--operator-contact",
         contact,
         *BENCHMARK_ARGS,
-        "--benchmark-value",
-        f"{TOOL}=0.83",
     )
     assert list(metadata) == [
         "name",
@@ -651,5 +558,5 @@ def test_regenerated_manifest_keeps_every_spec_field(tmp_path: Path) -> None:
     assert metadata["url"] == SAMPLE_URL
     assert metadata["termsUrl"] == generate_metadata.TERMS_URL
     assert metadata["operator"]["domain"] == domain
-    assert metadata["toolMetadata"][TOOL]["benchmark"]["value"] == 0.83
+    assert metadata["toolMetadata"][TOOL]["benchmark"]["url"] == SAMPLE_BENCHMARK_URL
     assert set(metadata["toolMetadata"][TOOL]) == {*TOOL_SCHEMA_FIELDS, "benchmark"}
