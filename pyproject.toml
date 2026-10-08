@@ -47,7 +47,7 @@ Repository = "https://github.com/valory-xyz/mech-social"
 
 [dependency-groups]
 dev = [
-    "tomte[cli, tests] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0",
+    "tomte[cli, tests]==0.7.3",
 ]
 
 [tool.uv]
@@ -77,7 +77,7 @@ upstream_pins = [
     "valory-xyz/mech@v0.35.7",
     "valory-xyz/kv-store@v0.7.1",
 ]
-tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@v0.7.0"
+tomte_dep_pin = "==0.7.3"
 
 [tool.uv.build-backend]
 module-name = ["packages"]
