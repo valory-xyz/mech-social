@@ -23,6 +23,7 @@ import copy
 import importlib.util
 import json
 import re
+import urllib.parse
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,9 +42,9 @@ SCHEMA_REGISTRY_PATH = Path(__file__).parent / "tool_schemas.yaml"
 TERMS_URL = "https://www.valory.xyz/terms/mechs"
 DEFAULT_BENCHMARK_METRIC = "accuracy"
 BENCHMARK_WINDOWS: Tuple[str, ...] = ("7d", "30d", "90d", "all")
-# One DNS label: letters, digits and inner hyphens, at most 63 characters.
-HOSTNAME_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", re.IGNORECASE)
-# `name` is deliberately absent: every mech must be named explicitly.
+MAX_HOSTNAME_LENGTH = 253
+# One lowercase ASCII DNS label: letters, digits and inner hyphens, 1 to 63 characters.
+HOSTNAME_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 METADATA_TEMPLATE: Dict[str, Any] = {
     "description": "The mech executes AI tasks requested on-chain and delivers the results to the requester.",
     "inputFormat": "ipfs-v0.1",
@@ -180,12 +181,25 @@ def build_tools_metadata(
     return result
 
 
+def _require_text(flag: str, value: str) -> str:
+    """Return the value when it has non-whitespace content; blank is an error."""
+    if not value.strip():
+        raise ValueError(f"{flag} must not be blank")
+    return value
+
+
 def validate_operator_domain(domain: str) -> str:
-    """Return the domain if it is a bare hostname: no scheme, path, port or trailing dot."""
+    """Return the domain if it is a lowercase bare hostname; reject, never normalise."""
     labels = domain.split(".")
-    if len(labels) < 2 or not all(HOSTNAME_LABEL.fullmatch(label) for label in labels):
+    if (
+        len(domain) > MAX_HOSTNAME_LENGTH
+        or len(labels) < 2
+        or not all(HOSTNAME_LABEL.fullmatch(label) for label in labels)
+    ):
         raise ValueError(
-            f"--operator-domain must be a bare hostname such as 'valory.xyz', got {domain!r}"
+            "--operator-domain must be a lowercase bare hostname such as 'valory.xyz' "
+            "(at least one dot, no scheme, path, port or trailing dot, at most "
+            f"{MAX_HOSTNAME_LENGTH} characters), got {domain!r}"
         )
     return domain
 
@@ -196,14 +210,17 @@ def build_operator(
     """Build the operator block, or None when no operator flag was given."""
     if name is None and domain is None and contact is None:
         return None
-    if not name or not domain:
+    if name is None or domain is None:
         raise ValueError(
             "--operator-name and --operator-domain are both required "
             "to emit an operator block"
         )
-    operator = {"name": name, "domain": validate_operator_domain(domain)}
-    if contact:
-        operator["contact"] = contact
+    operator = {
+        "name": _require_text("--operator-name", name),
+        "domain": validate_operator_domain(domain),
+    }
+    if contact is not None:
+        operator["contact"] = _require_text("--operator-contact", contact)
     return operator
 
 
@@ -221,51 +238,79 @@ def parse_benchmark_value(raw: str) -> Tuple[str, float]:
     return tool, value
 
 
-def build_benchmarks(
-    values: List[Tuple[str, float]],
-    metric: str,
+def parse_benchmark_values(values: List[Tuple[str, float]]) -> Dict[str, float]:
+    """Map each tool to its value; a tool given twice is an error."""
+    by_tool: Dict[str, float] = {}
+    for tool, value in values:
+        if tool in by_tool:
+            raise ValueError(f"--benchmark-value given twice for '{tool}'")
+        by_tool[tool] = value
+    return by_tool
+
+
+def is_https_url(url: str) -> bool:
+    """Return True for an https:// URL with a host and no whitespace."""
+    if any(char.isspace() for char in url):
+        return False
+    parsed = urllib.parse.urlsplit(url)
+    return parsed.scheme == "https" and bool(parsed.netloc)
+
+
+def build_benchmark(
+    metric: Optional[str],
     window: Optional[str],
     url: Optional[str],
-) -> Dict[str, Dict[str, Any]]:
-    """Map each tool to its benchmark object; metric, window and url are shared."""
-    if not values:
-        return {}
-    if not window or not url:
+    values: Dict[str, float],
+) -> Optional[Dict[str, str]]:
+    """Return the benchmark fields shared by every tool, or None when none was asked for."""
+    if url is None:
+        if metric is not None or window is not None or values:
+            raise ValueError(
+                "--benchmark-url is required when any other --benchmark-* flag is given"
+            )
+        return None
+    if window is None:
+        raise ValueError("--benchmark-window is required when --benchmark-url is given")
+    if not is_https_url(url):
         raise ValueError(
-            "--benchmark-window and --benchmark-url are required "
-            "when --benchmark-value is given"
+            f"--benchmark-url must be an https URL with a host, got {url!r}"
         )
-    benchmarks: Dict[str, Dict[str, Any]] = {}
-    for tool, value in values:
-        if tool in benchmarks:
-            raise ValueError(f"--benchmark-value given twice for '{tool}'")
-        benchmarks[tool] = {
-            "metric": metric,
-            "value": value,
-            "window": window,
-            "url": url,
-        }
-    return benchmarks
+    if metric is None:
+        metric = DEFAULT_BENCHMARK_METRIC
+    return {
+        "metric": _require_text("--benchmark-metric", metric),
+        "window": window,
+        "url": url,
+    }
 
 
 def attach_benchmarks(
-    metadata: Dict[str, Any], benchmarks: Dict[str, Dict[str, Any]]
+    metadata: Dict[str, Any],
+    benchmark: Optional[Dict[str, str]],
+    values: Dict[str, float],
 ) -> None:
-    """Add each benchmark to its tool's entry; every tool named must be in the output."""
-    unknown = set(benchmarks) - set(metadata["toolMetadata"])
+    """Give every tool the shared benchmark, with its value when one was given."""
+    if benchmark is None:
+        return
+    unknown = set(values) - set(metadata["toolMetadata"])
     if unknown:
         raise ValueError(
             f"--benchmark-value names tools missing from the output: {sorted(unknown)}"
         )
-    for tool, benchmark in benchmarks.items():
-        metadata["toolMetadata"][tool]["benchmark"] = benchmark
+    for tool, entry in metadata["toolMetadata"].items():
+        fields: Dict[str, Any] = {"metric": benchmark["metric"]}
+        if tool in values:
+            fields["value"] = values[tool]
+        fields["window"] = benchmark["window"]
+        fields["url"] = benchmark["url"]
+        entry["benchmark"] = fields
 
 
 def build_template(args: argparse.Namespace) -> Dict[str, Any]:
     """Build the top-level manifest fields from the CLI arguments."""
     fixed = copy.deepcopy(METADATA_TEMPLATE)
     template: Dict[str, Any] = {
-        "name": args.name,
+        "name": _require_text("--name", args.name),
         "description": args.description,
         "inputFormat": fixed["inputFormat"],
         "outputFormat": fixed["outputFormat"],
@@ -323,13 +368,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=[],
         type=parse_benchmark_value,
         metavar="TOOL=VALUE",
-        help="Benchmark value (0..1) for one tool (repeatable).",
+        help="Snapshot value (0..1) for one tool (repeatable); the url is the live figure.",
     )
     parser.add_argument(
         "--benchmark-metric",
         type=str,
-        default=DEFAULT_BENCHMARK_METRIC,
-        help="Benchmark metric shared by every tool.",
+        default=None,
+        help=f"Benchmark metric shared by every tool (default {DEFAULT_BENCHMARK_METRIC}).",
     )
     parser.add_argument(
         "--benchmark-window",
@@ -341,7 +386,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--benchmark-url",
         type=str,
         default=None,
-        help="Analytics endpoint covering every tool of this mech.",
+        help="https analytics endpoint covering every tool of this mech.",
     )
     parser.add_argument(
         "--skip-tool",
@@ -359,17 +404,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
 
     template = build_template(args)
-    benchmarks = build_benchmarks(
-        args.benchmark_value,
-        args.benchmark_metric,
-        args.benchmark_window,
-        args.benchmark_url,
+    values = parse_benchmark_values(args.benchmark_value)
+    benchmark = build_benchmark(
+        args.benchmark_metric, args.benchmark_window, args.benchmark_url, values
     )
     registry = load_schema_registry(args.schema_registry)
     tools_data = generate_tools_data(args.packages_root)
 
     metadata = build_tools_metadata(tools_data, registry, template, args.skip_tool)
-    attach_benchmarks(metadata, benchmarks)
+    attach_benchmarks(metadata, benchmark, values)
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=4)
     print(f"Metadata has been stored to {args.output}")
