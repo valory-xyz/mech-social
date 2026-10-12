@@ -226,6 +226,7 @@ models:
       optimism_ledger_rpc: ${str:http://localhost:8545}
       robinhood_ledger_rpc: ${str:http://localhost:8545}
       use_offchain: ${bool:false}
+      preimage_retention_enabled: ${bool:false}
       mech_events_chain_id: ${int:0}
 ---
 public_id: valory/ledger:0.19.0

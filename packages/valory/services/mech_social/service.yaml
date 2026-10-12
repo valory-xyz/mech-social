@@ -7,7 +7,7 @@ license: Apache-2.0
 fingerprint:
   README.md: bafybeidep2uhrmzlrjg5w7v2uodvkcss5ewvlowrnwtzjq6zikbw6czqj4
 fingerprint_ignore_patterns: []
-agent: valory/mech_social:0.1.0:bafybeih5aqzun2rjqm7iofbovrx6lfbu3ll75l7cbjt7yl5hihpf656foa
+agent: valory/mech_social:0.1.0:bafybeif5zbnx5aertjsdtnr6sn3uaxtjnxr2gljt5vrztnmy2gmattt5rm
 number_of_agents: 1
 deployment:
   agent:
@@ -252,6 +252,7 @@ type: skill
         robinhood_ledger_rpc: ${ROBINHOOD_LEDGER_RPC_0:str:http://host.docker.internal:8545}
         default_chain_id: ${DEFAULT_CHAIN_ID:str:gnosis}
         use_offchain: ${USE_OFFCHAIN:bool:false}
+        preimage_retention_enabled: ${PREIMAGE_RETENTION_ENABLED:bool:false}
         mech_events_chain_id: ${MECH_EVENTS_CHAIN_ID:int:0}
 1:
   models:
@@ -278,6 +279,7 @@ type: skill
         robinhood_ledger_rpc: ${ROBINHOOD_LEDGER_RPC_1:str:http://host.docker.internal:8545}
         default_chain_id: ${DEFAULT_CHAIN_ID:str:gnosis}
         use_offchain: ${USE_OFFCHAIN:bool:false}
+        preimage_retention_enabled: ${PREIMAGE_RETENTION_ENABLED:bool:false}
         mech_events_chain_id: ${MECH_EVENTS_CHAIN_ID:int:0}
 2:
   models:
@@ -304,6 +306,7 @@ type: skill
         robinhood_ledger_rpc: ${ROBINHOOD_LEDGER_RPC_2:str:http://host.docker.internal:8545}
         default_chain_id: ${DEFAULT_CHAIN_ID:str:gnosis}
         use_offchain: ${USE_OFFCHAIN:bool:false}
+        preimage_retention_enabled: ${PREIMAGE_RETENTION_ENABLED:bool:false}
         mech_events_chain_id: ${MECH_EVENTS_CHAIN_ID:int:0}
 3:
   models:
@@ -330,6 +333,7 @@ type: skill
         robinhood_ledger_rpc: ${ROBINHOOD_LEDGER_RPC_3:str:http://host.docker.internal:8545}
         default_chain_id: ${DEFAULT_CHAIN_ID:str:gnosis}
         use_offchain: ${USE_OFFCHAIN:bool:false}
+        preimage_retention_enabled: ${PREIMAGE_RETENTION_ENABLED:bool:false}
         mech_events_chain_id: ${MECH_EVENTS_CHAIN_ID:int:0}
 ---
 public_id: valory/ledger:0.19.0
