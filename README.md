@@ -60,11 +60,11 @@ calls:
 | [X API](https://docs.x.com/x-api) (`api.x.com`) | Recent post search and post counts | `x_bearer` | The tool continues with news only and reports `x`, `x_partial`, or `x_counts` in `degraded_sources`. |
 | [Serper](https://serper.dev/) (`google.serper.dev`) | News headlines | `serperapi` | The tool continues with X posts only and reports `news` in `degraded_sources`. |
 | [DexScreener](https://docs.dexscreener.com/) (`api.dexscreener.com`) | Token symbol, address, and chain verification | None | The tool continues with unverified input and reports `dexscreener` in `degraded_sources`. |
-| [OpenAI API](https://platform.openai.com/docs) | Token extraction from free text and sentiment labels | `openai` | The request fails with an `llm_error` error. Without a key, the request fails with an `internal` error. |
+| [OpenAI API](https://platform.openai.com/docs) | Token extraction from free text and sentiment labels | `openai` | The run raises, so the mech rejects it. Without a key, the request returns an `internal` error. |
 
-If both X and Serper fail, or if the `API_KEYS` variable has neither an
-`x_bearer` key nor a `serperapi` key, the request fails with a
-`source_unavailable` error.
+If both X and Serper fail, the run raises, so the mech rejects it. If the
+`API_KEYS` variable has neither an `x_bearer` key nor a `serperapi` key, the
+request returns a `source_unavailable` error before any service is called.
 
 None of these services has a fallback provider. The tool doesn't hold or move
 funds. Review this list at each release.

@@ -92,7 +92,13 @@ Output (JSON string, always all keys):
   "x_trend" (the count arrived without enough usable hourly buckets), "news",
   "dexscreener".
 - error: null, or {"type": "invalid_input" | "source_unavailable" |
-  "llm_error" | "internal", "message": "..."}; data fields are null then.
+  "internal", "message": "..."}; data fields are null then. Only a request
+  rejected before any source is read returns an error: a bad input, an
+  unsupported model, a missing openai key ("internal") or neither an X nor a
+  news key ("source_unavailable").
+
+A failure after that (both sources failing, an OpenAI error or an empty LLM
+answer, any other exception) raises out of `run`, so the mech rejects the run.
 """
 
 import html
@@ -115,13 +121,12 @@ from typing import (
     TypedDict,
 )
 
-import openai
 import requests
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-ErrorType = Literal["invalid_input", "source_unavailable", "llm_error", "internal"]
+ErrorType = Literal["invalid_input", "source_unavailable", "internal"]
 WarningType = Literal[
     "symbol_mismatch",
     "chain_mismatch",
@@ -346,7 +351,7 @@ class RunState(TypedDict):
 
 
 class ToolError(Exception):
-    """An error reported to the requester in the `error` field."""
+    """A request rejected before any source is read, returned in `error`."""
 
     def __init__(self, error_type: ErrorType, message: str) -> None:
         """Initialize the error.
@@ -357,6 +362,14 @@ class ToolError(Exception):
         super().__init__(message)
         self.error_type: ErrorType = error_type
         self.message = message
+
+
+class SourceUnavailableError(Exception):
+    """Neither X nor news returned data for the request."""
+
+
+class LLMResponseError(Exception):
+    """The LLM answered without the structured output the tool needs."""
 
 
 class ExtractedToken(BaseModel):
@@ -1228,7 +1241,7 @@ def extract_token(
     _count_tokens(counter_callback, response, model)
     parsed = response.choices[0].message.parsed
     if parsed is None:
-        raise ToolError("llm_error", "LLM returned no token extraction")
+        raise LLMResponseError("LLM returned no token extraction")
     return parsed
 
 
@@ -1294,7 +1307,7 @@ def score_sentiment(
     _count_tokens(counter_callback, response, model)
     parsed = response.choices[0].message.parsed
     if parsed is None:
-        raise ToolError("llm_error", "LLM returned no labels")
+        raise LLMResponseError("LLM returned no labels")
     return parsed
 
 
@@ -1591,7 +1604,7 @@ def _fetch_items(
         degraded.append("news")
 
     if "x" in degraded and "news" in degraded:
-        raise ToolError("source_unavailable", "both X and news sources failed")
+        raise SourceUnavailableError("both X and news sources failed")
     if "x" in degraded:
         notes.append("X unavailable.")
     if "x_partial" in degraded:
@@ -1828,6 +1841,7 @@ def run(**kwargs: Any) -> MechResponse:
     :param kwargs: 'tool', 'model', 'prompt', 'api_keys', 'counter_callback'.
     :return: the mech response tuple (result JSON, prompt, None, counter
         callback, api keys).
+    :raises ValueError: for an unsupported tool name.
     """
     tool = kwargs.get("tool")
     if tool not in ALLOWED_TOOLS:
@@ -1844,8 +1858,4 @@ def run(**kwargs: Any) -> MechResponse:
         analyze(prompt, api_keys, model, counter_callback, result)
     except ToolError as e:
         result = _error_result(result, e.error_type, e.message)
-    except openai.OpenAIError as e:
-        result = _error_result(result, "llm_error", f"{type(e).__name__}: {e}")
-    except Exception as e:  # pylint: disable=broad-except
-        result = _error_result(result, "internal", f"{type(e).__name__}: {e}")
     return json.dumps(result), prompt, None, counter_callback, api_keys

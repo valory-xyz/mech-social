@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
+import openai
 import pytest
 import requests
 
@@ -40,6 +41,12 @@ KEYS = {"openai": "sk", "serperapi": "serper", "x_bearer": "x"}
 _TAIL = f"{tool.X_QUERY_EXCLUSIONS} -is:retweet"
 _TREND = {"recent": 10, "previous": 5}
 PEPE_PROMPT = json.dumps({"symbol": "PEPE", "address": ADDRESS})
+# the OpenAI exceptions only store the HTTP request and response they carry
+OPENAI_REQUEST = MagicMock(name="openai_request")
+OPENAI_RATE_LIMITED = MagicMock(status_code=429, request=OPENAI_REQUEST)
+# the stubs fixture patches score_sentiment; tests that need the real one
+# restore it from here
+REAL_SCORE_SENTIMENT = tool.score_sentiment
 
 
 def _posts(n: int) -> List[Dict[str, Any]]:
@@ -629,13 +636,13 @@ def test_missing_openai_key_is_internal_error(
     assert result["error"]["type"] == "internal"
 
 
-def test_both_sources_failing(stubs: Dict[str, MagicMock]) -> None:
-    """Both sources failing returns source_unavailable with degraded list."""
+def test_both_sources_failing_raises(stubs: Dict[str, MagicMock]) -> None:
+    """Both sources failing raises out of run, before any scoring call."""
     stubs["x"].side_effect = requests.ConnectionError("down")
     stubs["news"].side_effect = requests.Timeout("slow")
-    result = _run(PEPE_PROMPT)
-    assert result["error"]["type"] == "source_unavailable"
-    assert result["degraded_sources"] == ["x", "news"]
+    with pytest.raises(tool.SourceUnavailableError, match="both X and news"):
+        tool.run(tool="token_social_sentiment", prompt=PEPE_PROMPT, api_keys=KEYS)
+    stubs["score"].assert_not_called()
 
 
 def test_no_data_is_not_an_error(stubs: Dict[str, MagicMock]) -> None:
@@ -730,18 +737,49 @@ def test_tally_drops_unknown_and_conflicting_ids() -> None:
     }
 
 
-def test_llm_error(stubs: Dict[str, MagicMock]) -> None:
-    """An OpenAI failure returns llm_error."""
-    stubs["score"].side_effect = tool.openai.OpenAIError("boom")
-    result = _run(PEPE_PROMPT)
-    assert result["error"]["type"] == "llm_error"
+@pytest.mark.parametrize(
+    "llm_failure,raised",
+    [
+        (openai.APIConnectionError(request=OPENAI_REQUEST), openai.APIConnectionError),
+        (openai.APITimeoutError(request=OPENAI_REQUEST), openai.APITimeoutError),
+        (
+            openai.RateLimitError(
+                "rate limited", response=OPENAI_RATE_LIMITED, body=None
+            ),
+            openai.RateLimitError,
+        ),
+    ],
+    ids=["connection", "timeout", "rate-limit"],
+)
+def test_openai_failure_raises_out_of_run(
+    stubs: Dict[str, MagicMock], llm_failure: Exception, raised: type
+) -> None:
+    """An OpenAI client failure while scoring propagates out of run."""
+    with (
+        patch.object(tool, "OpenAI") as client_cls,
+        patch.object(tool, "score_sentiment", REAL_SCORE_SENTIMENT),
+    ):
+        client_cls.return_value.beta.chat.completions.parse.side_effect = llm_failure
+        with pytest.raises(raised):
+            tool.run(tool="token_social_sentiment", prompt=PEPE_PROMPT, api_keys=KEYS)
 
 
-def test_unexpected_exception_is_internal(stubs: Dict[str, MagicMock]) -> None:
-    """Any other exception returns internal instead of raising."""
+def test_empty_llm_answer_raises_out_of_run(stubs: Dict[str, MagicMock]) -> None:
+    """A scoring answer without labels propagates out of run."""
+    with (
+        patch.object(tool, "OpenAI") as client_cls,
+        patch.object(tool, "score_sentiment", REAL_SCORE_SENTIMENT),
+    ):
+        client_cls.return_value = _parse_client(None)
+        with pytest.raises(tool.LLMResponseError, match="no labels"):
+            tool.run(tool="token_social_sentiment", prompt=PEPE_PROMPT, api_keys=KEYS)
+
+
+def test_unexpected_exception_raises_out_of_run(stubs: Dict[str, MagicMock]) -> None:
+    """Any other exception propagates out of run unchanged."""
     stubs["score"].side_effect = KeyError("x")
-    result = _run(PEPE_PROMPT)
-    assert result["error"]["type"] == "internal"
+    with pytest.raises(KeyError):
+        tool.run(tool="token_social_sentiment", prompt=PEPE_PROMPT, api_keys=KEYS)
 
 
 def test_model_not_allowed() -> None:
@@ -812,8 +850,8 @@ def test_score_sentiment_builds_prompt_and_counts_tokens() -> None:
     assert callback.call_args.kwargs["input_tokens"] == 12
 
 
-def test_score_sentiment_parsed_none_is_llm_error() -> None:
-    """A refusal (parsed None) surfaces as llm_error."""
+def test_score_sentiment_parsed_none_raises() -> None:
+    """A refusal (parsed None) raises LLMResponseError."""
     client = _parse_client(None)
     target: Dict[str, Any] = {
         "token": "PONS",
@@ -823,13 +861,12 @@ def test_score_sentiment_parsed_none_is_llm_error() -> None:
         "user_text": "q",
         "notes": [],
     }
-    with pytest.raises(tool.ToolError) as err:
+    with pytest.raises(tool.LLMResponseError, match="no labels"):
         tool.score_sentiment(client, tool.DEFAULT_MODEL, target, [], [], None)
-    assert err.value.error_type == "llm_error"
 
 
 def test_extract_token_formats_prompt_and_handles_none() -> None:
-    """extract_token sends the user text and maps a refusal to llm_error."""
+    """extract_token sends the user text and raises on a refusal."""
     extracted = tool.ExtractedToken(symbols=["PEPE"])
     client = _parse_client(extracted)
     assert (
@@ -838,7 +875,7 @@ def test_extract_token_formats_prompt_and_handles_none() -> None:
     kwargs = client.beta.chat.completions.parse.call_args.kwargs
     assert "how is pepe" in kwargs["messages"][0]["content"]
     assert kwargs["max_tokens"] == tool.EXTRACT_MAX_TOKENS
-    with pytest.raises(tool.ToolError):
+    with pytest.raises(tool.LLMResponseError, match="no token extraction"):
         tool.extract_token(_parse_client(None), tool.DEFAULT_MODEL, "x", None)
 
 
@@ -1939,15 +1976,6 @@ def test_address_not_listed_is_a_warning(
     ]
     assert result["reasoning"].startswith("Contract address not found")
     assert result["degraded_sources"] == []
-
-
-def test_warnings_kept_on_error(stubs: Dict[str, MagicMock]) -> None:
-    """A warning found before a later failure is still returned."""
-    stubs["resolve"].return_value = {**STOCK_INFO, "symbol": "PEPE2", "stock": False}
-    stubs["score"].side_effect = tool.ToolError("llm_error", "LLM returned no labels")
-    result = _run(PEPE_PROMPT)
-    assert result["error"]["type"] == "llm_error"
-    assert [w["type"] for w in result["warnings"]] == ["symbol_mismatch"]
 
 
 def test_resolve_token_prefers_requested_chain(monkeypatch: Any) -> None:
