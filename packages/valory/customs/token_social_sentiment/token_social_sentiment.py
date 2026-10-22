@@ -193,11 +193,12 @@ SMALL_SAMPLE_ITEMS = 10
 # LLM_TIMEOUT), under the mech's default TASK_DEADLINE of 240 s
 HTTP_TIMEOUT = 10
 # list prices in USD, reported to the mech as the cost of each request: X
-# pay-per-use (docs.x.com pricing) and Serper's Starter tier, checked
-# 2026-09-16. X bills a post once per UTC day, so repeated reads may cost less
+# pay-per-use (docs.x.com pricing, checked 2026-09-16) and the Serper pack the
+# predict tools price at (1 credit per query, 2026-10-21). X bills a post once
+# per UTC day, so repeated reads may cost less
 X_POST_READ_USD = 0.005
 X_COUNTS_REQUEST_USD = 0.005
-SERPER_QUERY_USD = 0.001
+SERPER_QUERY_USD = 0.00075
 # the OpenAI SDK defaults (600 s, 2 retries) can outlast the mech task deadline
 LLM_TIMEOUT = 30
 LLM_MAX_RETRIES = 1
