@@ -52,7 +52,7 @@ skills:
 - valory/transaction_settlement_abci:0.1.0:bafybeihizaapype5sz7vlosms3nfo6jzfj4ujycuf5uthviq2otvmw6f6m
 - valory/websocket_client:0.1.0:bafybeiht2ify5vkseeulutzjwkw5vcmhcwtun2o5ehn6hya6uz4eanua2m
 customs:
-- valory/token_social_sentiment:0.1.0:bafybeidtnnupc66ycsyitix7clajfvmzls4xscshcocv7zxfxu6txao2ya
+- valory/token_social_sentiment:0.1.0:bafybeihlcby5gzu67d3srvovqncwp4s2kpf5rye4krxg7vk2ltfijspjza
 default_ledger: ethereum
 required_ledgers:
 - ethereum

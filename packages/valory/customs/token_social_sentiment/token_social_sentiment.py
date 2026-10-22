@@ -91,14 +91,13 @@ Output (JSON string, always all keys):
   result: "x" (all X search slices), "x_partial" (some slices), "x_counts",
   "x_trend" (the count arrived without enough usable hourly buckets), "news",
   "dexscreener".
-- error: null, or {"type": "invalid_input" | "source_unavailable" |
-  "internal", "message": "..."}; data fields are null then. Only a request
-  rejected before any source is read returns an error: a bad input, an
-  unsupported model, a missing openai key ("internal") or neither an X nor a
-  news key ("source_unavailable").
 
-A failure after that (both sources failing, an OpenAI error or an empty LLM
-answer, any other exception) raises out of `run`, so the mech rejects the run.
+Every failure raises out of `run`, so the mech rejects the run and only a
+real result is returned: InvalidInputError for a bad input or an unsupported
+model, MissingAPIKeyError without an openai key or without both an X and a
+news key, SourceUnavailableError when both X and news fail, LLMResponseError
+for an empty LLM answer, and any other exception (OpenAI errors included)
+unchanged.
 """
 
 import html
@@ -126,7 +125,6 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-ErrorType = Literal["invalid_input", "source_unavailable", "internal"]
 WarningType = Literal[
     "symbol_mismatch",
     "chain_mismatch",
@@ -298,7 +296,6 @@ OUTPUT_KEYS = (
     "headlines",
     "warnings",
     "degraded_sources",
-    "error",
 )
 
 
@@ -350,18 +347,12 @@ class RunState(TypedDict):
     sampled_posts: int
 
 
-class ToolError(Exception):
-    """A request rejected before any source is read, returned in `error`."""
+class InvalidInputError(ValueError):
+    """The request cannot be served as given: bad prompt or unsupported model."""
 
-    def __init__(self, error_type: ErrorType, message: str) -> None:
-        """Initialize the error.
 
-        :param error_type: error category returned to the requester.
-        :param message: human-readable detail.
-        """
-        super().__init__(message)
-        self.error_type: ErrorType = error_type
-        self.message = message
+class MissingAPIKeyError(Exception):
+    """An API key the request needs is not configured."""
 
 
 class SourceUnavailableError(Exception):
@@ -489,13 +480,13 @@ def parse_prompt(prompt: str) -> Dict[str, Any]:
     }
     text = (prompt or "").strip()
     if not text:
-        raise ToolError("invalid_input", "empty prompt")
+        raise InvalidInputError("empty prompt")
 
     if text.startswith("{"):
         try:
             data = json.loads(text)
         except json.JSONDecodeError as e:
-            raise ToolError("invalid_input", f"prompt is not valid JSON: {e}") from e
+            raise InvalidInputError(f"prompt is not valid JSON: {e}") from e
         for key in ("symbol", "address", "window_seconds", "chain"):
             # an empty string means "not given"
             value = data.get(key)
@@ -507,16 +498,14 @@ def parse_prompt(prompt: str) -> Dict[str, Any]:
     found = ADDRESS_RE.findall(text)
     distinct = {a.lower() for a in found}
     if len(distinct) > 1:
-        raise ToolError(
-            "invalid_input",
+        raise InvalidInputError(
             f"one token per request, found {len(distinct)} contract addresses",
         )
     if found:
         parsed["address"] = found[0]
     cashtags = sorted({tag.upper() for tag in CASHTAG_RE.findall(text)})
     if len(cashtags) > 1:
-        raise ToolError(
-            "invalid_input",
+        raise InvalidInputError(
             f"one token per request, found {len(cashtags)}: {', '.join(cashtags)}",
         )
     if cashtags:
@@ -562,7 +551,7 @@ def validate_chain(chain: Any) -> Optional[str]:
     if chain is None:
         return None
     if not isinstance(chain, str) or not CHAIN_RE.match(chain.strip().lower()):
-        raise ToolError("invalid_input", f"invalid chain: {chain!r}")
+        raise InvalidInputError(f"invalid chain: {chain!r}")
     return chain.strip().lower()
 
 
@@ -575,13 +564,13 @@ def validate_token(symbol: Any, address: Any) -> Tuple[Optional[str], Optional[s
     """
     if symbol is not None:
         if not isinstance(symbol, str) or not SYMBOL_RE.fullmatch(symbol.lstrip("$")):
-            raise ToolError("invalid_input", f"invalid symbol: {symbol!r}")
+            raise InvalidInputError(f"invalid symbol: {symbol!r}")
         symbol = symbol.lstrip("$").upper()
     if address is not None:
         if not isinstance(address, str) or not ADDRESS_RE.fullmatch(address):
-            raise ToolError("invalid_input", f"invalid contract address: {address!r}")
+            raise InvalidInputError(f"invalid contract address: {address!r}")
     if symbol is None and address is None:
-        raise ToolError("invalid_input", "no token symbol or address found in prompt")
+        raise InvalidInputError("no token symbol or address found in prompt")
     return symbol, address
 
 
@@ -594,8 +583,8 @@ def clamp_window(window_seconds: Any) -> int:
     if window_seconds is None:
         return DEFAULT_WINDOW_SECONDS
     if isinstance(window_seconds, bool) or not isinstance(window_seconds, int):
-        raise ToolError(
-            "invalid_input", f"window_seconds must be an integer: {window_seconds!r}"
+        raise InvalidInputError(
+            f"window_seconds must be an integer: {window_seconds!r}"
         )
     return max(MIN_WINDOW_SECONDS, min(MAX_WINDOW_SECONDS, window_seconds))
 
@@ -1374,8 +1363,7 @@ def _resolve_target(
             | ({symbol} if symbol else set())
         )
         if len(symbols) > 1:
-            raise ToolError(
-                "invalid_input",
+            raise InvalidInputError(
                 f"one token per request, found {len(symbols)}: {', '.join(symbols)}",
             )
         symbol = symbols[0] if symbols else None
@@ -1670,10 +1658,10 @@ def analyze(
 
     openai_key = _api_key(api_keys, "openai")
     if not openai_key:
-        raise ToolError("internal", "missing openai API key")
+        raise MissingAPIKeyError("missing openai API key")
     if not _api_key(api_keys, "x_bearer") and not _api_key(api_keys, "serperapi"):
         # checked before any paid call
-        raise ToolError("source_unavailable", "no X or news API key")
+        raise MissingAPIKeyError("no X or news API key")
     client = OpenAI(
         api_key=openai_key, timeout=LLM_TIMEOUT, max_retries=LLM_MAX_RETRIES
     )
@@ -1818,23 +1806,6 @@ def sentiment_interval(breakdown: Dict[str, int]) -> Dict[str, float]:
     }
 
 
-def _error_result(
-    result: Dict[str, Any], error_type: ErrorType, message: str
-) -> Dict[str, Any]:
-    """Build the error output, keeping the window, warnings and degraded sources.
-
-    :param result: partially filled output.
-    :param error_type: error category.
-    :param message: error detail.
-    :return: output dict with data fields null.
-    """
-    error_result = _empty_result(result["window_seconds"])
-    error_result["degraded_sources"] = result.get("degraded_sources") or []
-    error_result["warnings"] = result.get("warnings") or []
-    error_result["error"] = {"type": error_type, "message": message}
-    return error_result
-
-
 def run(**kwargs: Any) -> MechResponse:
     """Run the token social sentiment tool.
 
@@ -1842,6 +1813,7 @@ def run(**kwargs: Any) -> MechResponse:
     :return: the mech response tuple (result JSON, prompt, None, counter
         callback, api keys).
     :raises ValueError: for an unsupported tool name.
+    :raises InvalidInputError: for an unsupported model.
     """
     tool = kwargs.get("tool")
     if tool not in ALLOWED_TOOLS:
@@ -1851,11 +1823,8 @@ def run(**kwargs: Any) -> MechResponse:
     counter_callback: Optional[Callable[..., Any]] = kwargs.get("counter_callback")
     api_keys = kwargs.get("api_keys")
     prompt = kwargs.get("prompt", "")
+    if model not in ALLOWED_MODELS:
+        raise InvalidInputError(f"model not supported: {model}")
     result = _empty_result(DEFAULT_WINDOW_SECONDS)
-    try:
-        if model not in ALLOWED_MODELS:
-            raise ToolError("invalid_input", f"model not supported: {model}")
-        analyze(prompt, api_keys, model, counter_callback, result)
-    except ToolError as e:
-        result = _error_result(result, e.error_type, e.message)
+    analyze(prompt, api_keys, model, counter_callback, result)
     return json.dumps(result), prompt, None, counter_callback, api_keys
