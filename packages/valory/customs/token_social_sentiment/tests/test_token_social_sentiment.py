@@ -210,7 +210,7 @@ def test_cashtag_and_named_token_rejected(stubs: Dict[str, MagicMock]) -> None:
     """A cashtag plus a token named in words is two tokens, not the cashtag one."""
     stubs["extract"].return_value = tool.ExtractedToken(symbols=["ETH"])
     with pytest.raises(
-        tool.InvalidInputError, match="^one token per request, found 2: BTC, ETH$"
+        tool.InvalidRequestError, match="^one token per request, found 2: BTC, ETH$"
     ):
         _call("Compare $BTC and Ethereum")
 
@@ -239,7 +239,7 @@ def test_address_only_taken_verbatim_from_text(stubs: Dict[str, MagicMock]) -> N
 def test_two_tokens_rejected(stubs: Dict[str, MagicMock], prompt: str) -> None:
     """Free text naming two tokens is rejected, not silently truncated."""
     stubs["extract"].return_value = tool.ExtractedToken(symbols=["PEPE", "DOGE"])
-    with pytest.raises(tool.InvalidInputError, match="one token per request"):
+    with pytest.raises(tool.InvalidRequestError, match="one token per request"):
         _call(prompt)
     stubs["x"].assert_not_called()
 
@@ -270,18 +270,28 @@ def test_same_token_twice_is_one_token(stubs: Dict[str, MagicMock]) -> None:
     ],
 )
 def test_invalid_input(stubs: Dict[str, MagicMock], prompt: str, message: str) -> None:
-    """Bad input raises InvalidInputError before any source is read."""
+    """Bad input raises InvalidRequestError before any source is read."""
     stubs["extract"].return_value = tool.ExtractedToken(symbols=[])
-    with pytest.raises(tool.InvalidInputError, match=message):
+    with pytest.raises(tool.InvalidRequestError, match=message):
         _call(prompt)
     for name in ("resolve", "x", "news", "score"):
         stubs[name].assert_not_called()
 
 
-def test_invalid_input_is_a_value_error(stubs: Dict[str, MagicMock]) -> None:
-    """Callers that catch ValueError for bad input still catch it."""
-    with pytest.raises(ValueError):
-        _call("")
+def test_invalid_request_error_matches_the_mech_contract() -> None:
+    """The mech recognises a client-side error by this exact class name."""
+    assert tool.InvalidRequestError.__name__ == "InvalidRequestError"
+    assert issubclass(tool.InvalidRequestError, ValueError)
+
+
+@pytest.mark.parametrize(
+    "error_cls",
+    [tool.MissingAPIKeyError, tool.SourceUnavailableError, tool.LLMResponseError],
+)
+def test_mech_side_errors_are_not_invalid_request(error_cls: type) -> None:
+    """Failures on the mech's side never carry the client-side class name."""
+    assert error_cls.__name__ != "InvalidRequestError"
+    assert not issubclass(error_cls, tool.InvalidRequestError)
 
 
 def test_empty_chain_is_not_given(stubs: Dict[str, MagicMock]) -> None:
@@ -789,7 +799,7 @@ def test_unexpected_exception_raises_out_of_run(stubs: Dict[str, MagicMock]) -> 
 
 def test_model_not_allowed(stubs: Dict[str, MagicMock]) -> None:
     """Requester-chosen models outside the allow-list raise before any call."""
-    with pytest.raises(tool.InvalidInputError, match="^model not supported: o3-pro$"):
+    with pytest.raises(tool.InvalidRequestError, match="^model not supported: o3-pro$"):
         _call(json.dumps({"symbol": "PEPE"}), model="o3-pro")
     stubs["resolve"].assert_not_called()
 
@@ -800,10 +810,14 @@ def test_allowed_model_is_served(stubs: Dict[str, MagicMock]) -> None:
     assert _run(json.dumps({"symbol": "PEPE"}), model=model)["token"] == "PEPE"
 
 
-def test_unknown_tool_raises() -> None:
-    """An unsupported tool name raises like the other tools."""
-    with pytest.raises(ValueError):
-        tool.run(tool="other", prompt="x", api_keys=KEYS)
+@pytest.mark.parametrize("tool_name", ["other", "", None])
+def test_unknown_tool_is_an_invalid_request(
+    stubs: Dict[str, MagicMock], tool_name: Any
+) -> None:
+    """An unsupported tool name is a fault in the request; nothing is called."""
+    with pytest.raises(tool.InvalidRequestError, match="is not supported"):
+        tool.run(tool=tool_name, prompt=PEPE_PROMPT, api_keys=KEYS)
+    stubs["resolve"].assert_not_called()
 
 
 def test_openai_client_has_timeout(stubs: Dict[str, MagicMock]) -> None:
@@ -1958,7 +1972,7 @@ def test_no_source_keys_fails_before_paid_calls(stubs: Dict[str, MagicMock]) -> 
 
 def test_symbol_with_trailing_newline_is_rejected(stubs: Dict[str, MagicMock]) -> None:
     """A symbol must match exactly; a newline cannot reach the X query."""
-    with pytest.raises(tool.InvalidInputError, match="invalid symbol"):
+    with pytest.raises(tool.InvalidRequestError, match="invalid symbol"):
         _call(json.dumps({"symbol": "PEPE\n"}))
     stubs["x"].assert_not_called()
 

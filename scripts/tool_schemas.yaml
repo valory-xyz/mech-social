@@ -54,8 +54,10 @@ defaults:
               message names the token with the most DEX volume for the ticker).
               degraded_sources: sources that failed while a result was still
               produced (x, x_partial, x_counts, x_trend, news, dexscreener).
-              A failed run (bad input, unsupported model, missing keys, no
-              source or LLM answer) returns no result: the mech rejects it.
+              A failed run returns no result. Bad input, an unsupported tool
+              or an unsupported model is a client-side error
+              (InvalidRequestError); missing keys or no source or LLM answer
+              is a failure on the mech's side.
             example: |-
               {
                 "token": "ABC",

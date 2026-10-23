@@ -92,12 +92,14 @@ Output (JSON string, always all keys):
   "x_trend" (the count arrived without enough usable hourly buckets), "news",
   "dexscreener".
 
-Every failure raises out of `run`, so the mech rejects the run and only a
-real result is returned: InvalidInputError for a bad input or an unsupported
-model, MissingAPIKeyError without an openai key or without both an X and a
-news key, SourceUnavailableError when both X and news fail, LLMResponseError
-for an empty LLM answer, and any other exception (OpenAI errors included)
-unchanged.
+Every failure raises out of `run`, so only a real result is returned.
+InvalidRequestError (a ValueError) marks a fault in the request itself: bad
+input, an unsupported tool name or an unsupported model. The mech matches that
+class name to tell a client-side error apart from a tool or provider failure.
+Every other exception is a failure on the mech's side: MissingAPIKeyError
+without an openai key or without both an X and a news key,
+SourceUnavailableError when both X and news fail, LLMResponseError for an
+empty LLM answer, and any other exception (OpenAI errors included) unchanged.
 """
 
 import html
@@ -347,12 +349,16 @@ class RunState(TypedDict):
     sampled_posts: int
 
 
-class InvalidInputError(ValueError):
-    """The request cannot be served as given: bad prompt or unsupported model."""
+class InvalidRequestError(ValueError):
+    """The request cannot be served as sent: the fault is in the buyer's input.
+
+    The mech matches this class name to tell a client-side error apart from a
+    tool or provider failure. Raise it only for faults in the request.
+    """
 
 
 class MissingAPIKeyError(Exception):
-    """An API key the request needs is not configured."""
+    """An API key the tool needs is not configured on the mech."""
 
 
 class SourceUnavailableError(Exception):
@@ -480,13 +486,13 @@ def parse_prompt(prompt: str) -> Dict[str, Any]:
     }
     text = (prompt or "").strip()
     if not text:
-        raise InvalidInputError("empty prompt")
+        raise InvalidRequestError("empty prompt")
 
     if text.startswith("{"):
         try:
             data = json.loads(text)
         except json.JSONDecodeError as e:
-            raise InvalidInputError(f"prompt is not valid JSON: {e}") from e
+            raise InvalidRequestError(f"prompt is not valid JSON: {e}") from e
         for key in ("symbol", "address", "window_seconds", "chain"):
             # an empty string means "not given"
             value = data.get(key)
@@ -498,14 +504,14 @@ def parse_prompt(prompt: str) -> Dict[str, Any]:
     found = ADDRESS_RE.findall(text)
     distinct = {a.lower() for a in found}
     if len(distinct) > 1:
-        raise InvalidInputError(
+        raise InvalidRequestError(
             f"one token per request, found {len(distinct)} contract addresses",
         )
     if found:
         parsed["address"] = found[0]
     cashtags = sorted({tag.upper() for tag in CASHTAG_RE.findall(text)})
     if len(cashtags) > 1:
-        raise InvalidInputError(
+        raise InvalidRequestError(
             f"one token per request, found {len(cashtags)}: {', '.join(cashtags)}",
         )
     if cashtags:
@@ -551,7 +557,7 @@ def validate_chain(chain: Any) -> Optional[str]:
     if chain is None:
         return None
     if not isinstance(chain, str) or not CHAIN_RE.match(chain.strip().lower()):
-        raise InvalidInputError(f"invalid chain: {chain!r}")
+        raise InvalidRequestError(f"invalid chain: {chain!r}")
     return chain.strip().lower()
 
 
@@ -564,13 +570,13 @@ def validate_token(symbol: Any, address: Any) -> Tuple[Optional[str], Optional[s
     """
     if symbol is not None:
         if not isinstance(symbol, str) or not SYMBOL_RE.fullmatch(symbol.lstrip("$")):
-            raise InvalidInputError(f"invalid symbol: {symbol!r}")
+            raise InvalidRequestError(f"invalid symbol: {symbol!r}")
         symbol = symbol.lstrip("$").upper()
     if address is not None:
         if not isinstance(address, str) or not ADDRESS_RE.fullmatch(address):
-            raise InvalidInputError(f"invalid contract address: {address!r}")
+            raise InvalidRequestError(f"invalid contract address: {address!r}")
     if symbol is None and address is None:
-        raise InvalidInputError("no token symbol or address found in prompt")
+        raise InvalidRequestError("no token symbol or address found in prompt")
     return symbol, address
 
 
@@ -583,7 +589,7 @@ def clamp_window(window_seconds: Any) -> int:
     if window_seconds is None:
         return DEFAULT_WINDOW_SECONDS
     if isinstance(window_seconds, bool) or not isinstance(window_seconds, int):
-        raise InvalidInputError(
+        raise InvalidRequestError(
             f"window_seconds must be an integer: {window_seconds!r}"
         )
     return max(MIN_WINDOW_SECONDS, min(MAX_WINDOW_SECONDS, window_seconds))
@@ -1363,7 +1369,7 @@ def _resolve_target(
             | ({symbol} if symbol else set())
         )
         if len(symbols) > 1:
-            raise InvalidInputError(
+            raise InvalidRequestError(
                 f"one token per request, found {len(symbols)}: {', '.join(symbols)}",
             )
         symbol = symbols[0] if symbols else None
@@ -1812,19 +1818,18 @@ def run(**kwargs: Any) -> MechResponse:
     :param kwargs: 'tool', 'model', 'prompt', 'api_keys', 'counter_callback'.
     :return: the mech response tuple (result JSON, prompt, None, counter
         callback, api keys).
-    :raises ValueError: for an unsupported tool name.
-    :raises InvalidInputError: for an unsupported model.
+    :raises InvalidRequestError: for an unsupported tool name or model.
     """
     tool = kwargs.get("tool")
     if tool not in ALLOWED_TOOLS:
-        raise ValueError(f"Tool {tool} is not supported.")
+        raise InvalidRequestError(f"Tool {tool} is not supported.")
 
     model = kwargs.get("model") or DEFAULT_MODEL
     counter_callback: Optional[Callable[..., Any]] = kwargs.get("counter_callback")
     api_keys = kwargs.get("api_keys")
     prompt = kwargs.get("prompt", "")
     if model not in ALLOWED_MODELS:
-        raise InvalidInputError(f"model not supported: {model}")
+        raise InvalidRequestError(f"model not supported: {model}")
     result = _empty_result(DEFAULT_WINDOW_SECONDS)
     analyze(prompt, api_keys, model, counter_callback, result)
     return json.dumps(result), prompt, None, counter_callback, api_keys

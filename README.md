@@ -64,9 +64,15 @@ calls:
 
 If both X and Serper fail, the run raises, so the mech rejects it. If the
 `API_KEYS` variable has neither an `x_bearer` key nor a `serperapi` key, the
-run raises before any service is called. Bad input and an unsupported model
-also raise. The tool returns a result only when it has one, so a failed run is
-never delivered as an answer.
+run raises before any service is called. The tool returns a result only when
+it has one, so a failed run is never delivered as an answer.
+
+A run that fails because of the request itself raises `InvalidRequestError`, a
+`ValueError`: bad input, an unsupported tool name or an unsupported model. The
+mech treats that class name as a client-side error and charges the buyer's
+signed maximum. Every other exception, such as a missing key, both sources
+failing or an OpenAI error, is a failure on the mech's side, and the mech
+charges only its small minimum.
 
 None of these services has a fallback provider. The tool doesn't hold or move
 funds. Review this list at each release.
