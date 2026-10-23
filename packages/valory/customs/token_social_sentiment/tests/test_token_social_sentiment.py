@@ -20,12 +20,14 @@
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import openai
 import pytest
 import requests
+import yaml
 
 from packages.valory.customs.token_social_sentiment import (
     token_social_sentiment as tool,
@@ -857,6 +859,15 @@ def test_allowed_model_is_served(stubs: Dict[str, MagicMock]) -> None:
     """A model in the allow-list runs normally."""
     model = sorted(tool.ALLOWED_MODELS)[0]
     assert _run(json.dumps({"symbol": "PEPE"}), model=model)["token"] == "PEPE"
+
+
+def test_component_default_model_is_the_tool_default_and_allowed() -> None:
+    """The model the mech fills in for a request without one is served by the tool."""
+    component = yaml.safe_load(
+        Path(tool.__file__).with_name("component.yaml").read_text(encoding="utf-8")
+    )
+    assert component["params"]["default_model"] == tool.DEFAULT_MODEL
+    assert tool.DEFAULT_MODEL in tool.ALLOWED_MODELS
 
 
 @pytest.mark.parametrize("tool_name", ["other", "", None])
