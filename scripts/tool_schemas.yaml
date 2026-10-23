@@ -57,7 +57,10 @@ defaults:
               A failed run returns no result. Bad input, an unsupported tool
               or an unsupported model is a client-side error
               (InvalidRequestError); missing keys or no source or LLM answer
-              is a failure on the mech's side.
+              is a failure on the mech's side. Off-chain, the mech reports a
+              failed run with an error and a fault field. On-chain, result is
+              then the error as plain text ("<ErrorType>: <message>"), not
+              this JSON.
             example: |-
               {
                 "token": "ABC",
