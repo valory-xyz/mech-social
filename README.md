@@ -71,8 +71,9 @@ A run that fails because of the request itself raises `InvalidRequestError`, a
 `ValueError`: bad input, an unsupported tool name or an unsupported model. The
 mech treats that class name as a client-side error and charges the buyer's
 signed maximum. Every other exception, such as a missing key, both sources
-failing or an OpenAI error, is a failure on the mech's side, and the mech
-charges only its small minimum.
+failing, an OpenAI error, or the model reading a second ticker or none from
+free text, is a failure on the mech's side, and the mech charges only its small
+minimum.
 
 None of these services has a fallback provider. The tool doesn't hold or move
 funds. Review this list at each release.

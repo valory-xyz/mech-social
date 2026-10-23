@@ -56,8 +56,9 @@ defaults:
               produced (x, x_partial, x_counts, x_trend, news, dexscreener).
               A failed run returns no result. Bad input, an unsupported tool
               or an unsupported model is a client-side error
-              (InvalidRequestError); missing keys or no source or LLM answer
-              is a failure on the mech's side. Off-chain, the mech reports a
+              (InvalidRequestError); missing keys, no source or LLM answer,
+              or the model not reading exactly one ticker from free text is a
+              failure on the mech's side. Off-chain, the mech reports a
               failed run with an error and a fault field. On-chain, result is
               then the error as plain text ("<ErrorType>: <message>"), not
               this JSON.

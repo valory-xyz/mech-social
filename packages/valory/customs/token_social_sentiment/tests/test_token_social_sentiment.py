@@ -206,13 +206,16 @@ def test_free_text_cashtag_without_address_is_checked(
     stubs["extract"].assert_called_once()
 
 
-def test_cashtag_and_named_token_rejected(stubs: Dict[str, MagicMock]) -> None:
-    """A cashtag plus a token named in words is two tokens, not the cashtag one."""
+def test_cashtag_and_named_token_is_an_extraction_fault(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """A second ticker from the extraction model is the mech's side."""
     stubs["extract"].return_value = tool.ExtractedToken(symbols=["ETH"])
     with pytest.raises(
-        tool.InvalidRequestError, match="^one token per request, found 2: BTC, ETH$"
+        tool.TokenExtractionError, match="^token extraction found 2 tokens: BTC, ETH$"
     ):
         _call("Compare $BTC and Ethereum")
+    stubs["x"].assert_not_called()
 
 
 def test_free_text_uses_llm_extraction(stubs: Dict[str, MagicMock]) -> None:
@@ -234,14 +237,56 @@ def test_address_only_taken_verbatim_from_text(stubs: Dict[str, MagicMock]) -> N
 
 @pytest.mark.parametrize(
     "prompt",
-    ["$PEPE or $DOGE?", "compare pepe and doge", f"{ADDRESS} vs {OTHER_ADDRESS}"],
+    ["$PEPE or $DOGE?", f"{ADDRESS} vs {OTHER_ADDRESS}"],
 )
-def test_two_tokens_rejected(stubs: Dict[str, MagicMock], prompt: str) -> None:
-    """Free text naming two tokens is rejected, not silently truncated."""
-    stubs["extract"].return_value = tool.ExtractedToken(symbols=["PEPE", "DOGE"])
+def test_two_tokens_in_buyer_text_rejected(
+    stubs: Dict[str, MagicMock], prompt: str
+) -> None:
+    """Two cashtags or addresses written in the text are the buyer's input."""
+    stubs["extract"].return_value = tool.ExtractedToken(symbols=["PEPE"])
     with pytest.raises(tool.InvalidRequestError, match="one token per request"):
         _call(prompt)
+    stubs["extract"].assert_not_called()
     stubs["x"].assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "prompt,symbols,message",
+    [
+        ("compare pepe and doge", ["PEPE", "DOGE"], "found 2 tokens: DOGE, PEPE"),
+        ("pepe on robinhood", ["PEPE", "ROBINHOOD"], "found 2 tokens"),
+        ("how is pepe doing", ["PEPE", "pepe", ""], None),
+        ("how is pepe doing", [], "found no token"),
+        ("[1, 2]", [], "found no token"),
+        ("how is pepe doing", ["PE PE"], "invalid symbol: 'PE PE'"),
+        ("how is pepe doing", ["PEPE", "1PEPE"], "invalid symbol: '1PEPE'"),
+    ],
+)
+def test_extraction_model_answer_is_mech_side(
+    stubs: Dict[str, MagicMock],
+    prompt: str,
+    symbols: List[str],
+    message: Optional[str],
+) -> None:
+    """Anything but one valid ticker from the model is a mech-side fault."""
+    stubs["extract"].return_value = tool.ExtractedToken(symbols=symbols)
+    if message is None:
+        assert _run(prompt)["token"] == "PEPE"
+        return
+    with pytest.raises(tool.TokenExtractionError, match=message):
+        _call(prompt)
+    for name in ("resolve", "x", "news", "score"):
+        stubs[name].assert_not_called()
+
+
+def test_model_miss_with_address_in_text_still_runs(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """An address in the text is enough when the model names no ticker."""
+    stubs["extract"].return_value = tool.ExtractedToken(symbols=[])
+    result = _run(f"how is {ADDRESS} doing")
+    assert result["address"] == ADDRESS
+    assert result["token"] == "PEPE"
 
 
 def test_same_token_twice_is_one_token(stubs: Dict[str, MagicMock]) -> None:
@@ -256,7 +301,6 @@ def test_same_token_twice_is_one_token(stubs: Dict[str, MagicMock]) -> None:
     [
         ("", "empty prompt"),
         ("{bad json", "not valid JSON"),
-        ("[1, 2]", "no token symbol"),
         (json.dumps({"symbol": "PE PE"}), "invalid symbol"),
         (json.dumps({"address": "0x123"}), "invalid contract address"),
         (json.dumps({"symbol": "PEPE", "window_seconds": "1d"}), "integer"),
@@ -286,7 +330,12 @@ def test_invalid_request_error_matches_the_mech_contract() -> None:
 
 @pytest.mark.parametrize(
     "error_cls",
-    [tool.MissingAPIKeyError, tool.SourceUnavailableError, tool.LLMResponseError],
+    [
+        tool.MissingAPIKeyError,
+        tool.SourceUnavailableError,
+        tool.LLMResponseError,
+        tool.TokenExtractionError,
+    ],
 )
 def test_mech_side_errors_are_not_invalid_request(error_cls: type) -> None:
     """Failures on the mech's side never carry the client-side class name."""

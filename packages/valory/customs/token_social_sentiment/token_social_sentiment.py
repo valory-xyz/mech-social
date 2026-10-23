@@ -99,7 +99,9 @@ class name to tell a client-side error apart from a tool or provider failure.
 Every other exception is a failure on the mech's side: MissingAPIKeyError
 without an openai key or without both an X and a news key,
 SourceUnavailableError when both X and news fail, LLMResponseError for an
-empty LLM answer, and any other exception (OpenAI errors included) unchanged.
+empty LLM answer, TokenExtractionError when the extraction model does not name
+exactly one valid ticker for a free-text prompt, and any other exception
+(OpenAI errors included) unchanged.
 """
 
 import html
@@ -367,6 +369,14 @@ class SourceUnavailableError(Exception):
 
 class LLMResponseError(Exception):
     """The LLM answered without the structured output the tool needs."""
+
+
+class TokenExtractionError(Exception):
+    """The extraction model did not name exactly one valid ticker for the text.
+
+    The model's reading of free text is the mech's side, so a second ticker,
+    a malformed one or none at all is not a fault in the request.
+    """
 
 
 class ExtractedToken(BaseModel):
@@ -1364,14 +1374,19 @@ def _resolve_target(
         # A cashtag without an address is checked too, so "$BTC or Ethereum"
         # is not read as a BTC-only request
         extracted = extract_token(client, model, parsed["free_text"], counter_callback)
-        symbols = sorted(
-            {sym.lstrip("$").upper() for sym in extracted.symbols if sym}
-            | ({symbol} if symbol else set())
-        )
-        if len(symbols) > 1:
-            raise InvalidRequestError(
-                f"one token per request, found {len(symbols)}: {', '.join(symbols)}",
+        model_symbols = {sym.lstrip("$").upper() for sym in extracted.symbols if sym}
+        malformed = sorted(m for m in model_symbols if not SYMBOL_RE.fullmatch(m))
+        if malformed:
+            raise TokenExtractionError(
+                f"token extraction returned an invalid symbol: {malformed[0]!r}"
             )
+        symbols = sorted(model_symbols | ({symbol} if symbol else set()))
+        if len(symbols) > 1:
+            raise TokenExtractionError(
+                f"token extraction found {len(symbols)} tokens: {', '.join(symbols)}",
+            )
+        if not symbols and address is None:
+            raise TokenExtractionError("token extraction found no token in the text")
         symbol = symbols[0] if symbols else None
     symbol, address = validate_token(symbol, address)
 

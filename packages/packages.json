@@ -1,8 +1,8 @@
 {
     "dev": {
-        "custom/valory/token_social_sentiment/0.1.0": "bafybeicoy3phpxqvrejfhjz43w3ha4x76gy3eg7ryzcm7ek3djppbghcf4",
-        "agent/valory/mech_social/0.1.0": "bafybeibumztd7ldqxe7nzyxwuvpzvw63hizjggerjwd5ihn64ucd27nlze",
-        "service/valory/mech_social/0.1.0": "bafybeifvl5g6y4rmzqekitijbceon2vxhhjep7wujg6jasl26ll6w2tsri"
+        "custom/valory/token_social_sentiment/0.1.0": "bafybeihy5xrartcmdrxt2qcm6duv3tzxpi5hassaiy6qcmuqt4nysvlfdu",
+        "agent/valory/mech_social/0.1.0": "bafybeiebhde35o5n2smcmbsclxgp2537abfmaxr3aw2x324mgim2jkoev4",
+        "service/valory/mech_social/0.1.0": "bafybeienysnxb3iqj6od6qq6ssnzaxnr44l265lqccd4hadkakez4rzg7y"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",
