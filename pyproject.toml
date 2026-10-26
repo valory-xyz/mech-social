@@ -74,7 +74,7 @@ pytest_targets = ["tests", "packages/valory/customs"]
 # tomte auto-prepends valory-xyz/open-autonomy@... and open-aea@...
 # from pyproject pins, so only the non-PyPI upstreams need listing.
 upstream_pins = [
-    "valory-xyz/mech@v0.35.9",
+    "valory-xyz/mech@v0.36.0",
     "valory-xyz/kv-store@v0.7.1",
 ]
 tomte_dep_pin = "==0.7.3"
