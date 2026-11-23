@@ -78,8 +78,8 @@ upstream_pins = [
     "valory-xyz/kv-store@v0.7.1",
 ]
 tomte_dep_pin = "==0.7.4"
-# filelock advisories disclosed 2026-10-20 against the version safety's
-# own tox venv installs; no shipped code uses that filelock.
+# filelock advisories against the version safety's own tox venv installs;
+# no shipped code uses that filelock.
 safety_ignores = [
     "SFTY-20261020-11422",
     "SFTY-20261020-13394",
@@ -88,6 +88,9 @@ safety_ignores = [
     "SFTY-20261020-34461",
     "SFTY-20261020-81101",
     "SFTY-20261020-91319",
+    "SFTY-20261023-10299",
+    "SFTY-20261023-16869",
+    "SFTY-20261023-24590",
 ]
 
 [tool.uv.build-backend]
