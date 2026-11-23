@@ -49,6 +49,18 @@ OPENAI_RATE_LIMITED = MagicMock(status_code=429, request=OPENAI_REQUEST)
 # the stubs fixture patches score_sentiment; tests that need the real one
 # restore it from here
 REAL_SCORE_SENTIMENT = tool.score_sentiment
+# usage of a completion cut at its token limit, and what X billed for a sample
+CUT_PROMPT_TOKENS = 40
+CUT_COMPLETION_TOKENS = tool.SCORE_MAX_TOKENS
+X_COST_USD = 0.205
+SCORE_TARGET: Dict[str, Any] = {
+    "token": "PONS",
+    "address": ADDRESS,
+    "chain": None,
+    "window_seconds": 86400,
+    "user_text": "q",
+    "notes": [],
+}
 
 
 def _posts(n: int) -> List[Dict[str, Any]]:
@@ -963,6 +975,79 @@ def test_extract_token_formats_prompt_and_handles_none() -> None:
     assert kwargs["max_tokens"] == tool.EXTRACT_MAX_TOKENS
     with pytest.raises(tool.LLMResponseError, match="no token extraction"):
         tool.extract_token(_parse_client(None), tool.DEFAULT_MODEL, "x", None)
+
+
+def _cut_client(usage: Any) -> MagicMock:
+    """Build an OpenAI client whose parse() raises a completion cut at its limit."""
+    client = MagicMock()
+    client.beta.chat.completions.parse.side_effect = openai.LengthFinishReasonError(
+        completion=MagicMock(usage=usage)
+    )
+    return client
+
+
+def _cut_usage() -> MagicMock:
+    """Usage of a completion cut at its token limit."""
+    return MagicMock(
+        prompt_tokens=CUT_PROMPT_TOKENS, completion_tokens=CUT_COMPLETION_TOKENS
+    )
+
+
+def _extract(client: MagicMock, callback: Any) -> Any:
+    """Run the extraction call."""
+    return tool.extract_token(client, tool.DEFAULT_MODEL, "how is pepe", callback)
+
+
+def _score(client: MagicMock, callback: Any) -> Any:
+    """Run the scoring call."""
+    return tool.score_sentiment(
+        client, tool.DEFAULT_MODEL, SCORE_TARGET, _posts(1), [], callback
+    )
+
+
+@pytest.mark.parametrize("llm_call", [_extract, _score], ids=["extract", "score"])
+def test_cut_completion_reports_its_tokens_and_raises(llm_call: Any) -> None:
+    """A completion cut at its token limit reports its usage, then raises."""
+    callback = MagicMock()
+    with pytest.raises(openai.LengthFinishReasonError):
+        llm_call(_cut_client(_cut_usage()), callback)
+    callback.assert_called_once()
+    kwargs = callback.call_args.kwargs
+    assert kwargs["input_tokens"] == CUT_PROMPT_TOKENS
+    assert kwargs["output_tokens"] == CUT_COMPLETION_TOKENS
+    assert kwargs["model"] == tool.DEFAULT_MODEL
+    assert "call_cost" not in kwargs
+
+
+@pytest.mark.parametrize("llm_call", [_extract, _score], ids=["extract", "score"])
+def test_cut_completion_without_usage_or_callback_still_raises(llm_call: Any) -> None:
+    """A cut completion raises unchanged with no usage or no callback to report to."""
+    callback = MagicMock()
+    with pytest.raises(openai.LengthFinishReasonError):
+        llm_call(_cut_client(None), callback)
+    callback.assert_not_called()
+    with pytest.raises(openai.LengthFinishReasonError):
+        llm_call(_cut_client(_cut_usage()), None)
+
+
+def test_run_cut_while_scoring_reports_sources_then_tokens(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """A run whose scoring answer is cut raises after reporting all it used."""
+    stubs["x"].return_value = (_posts(8), 1830, _TREND, [], X_COST_USD)
+    callback = MagicMock()
+    with (
+        patch.object(tool, "OpenAI", return_value=_cut_client(_cut_usage())),
+        patch.object(tool, "score_sentiment", REAL_SCORE_SENTIMENT),
+    ):
+        with pytest.raises(openai.LengthFinishReasonError):
+            _call(PEPE_PROMPT, counter_callback=callback)
+    sources, tokens = (call.kwargs for call in callback.call_args_list)
+    assert sources["call_cost"] == pytest.approx(X_COST_USD + tool.SERPER_QUERY_USD)
+    assert (tokens["input_tokens"], tokens["output_tokens"]) == (
+        CUT_PROMPT_TOKENS,
+        CUT_COMPLETION_TOKENS,
+    )
 
 
 def _x_response(data: Any = None, meta: Any = None) -> MagicMock:
@@ -2020,6 +2105,34 @@ def test_cost_reporting_failure_does_not_fail_the_request(
     callback = MagicMock(side_effect=TypeError("unexpected keyword call_cost"))
     result = _run(PEPE_PROMPT, counter_callback=callback)
     assert result["sentiment"] is not None
+
+
+def test_source_cost_reported_when_the_fetch_fails_after_a_paid_read(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """X posts already read are reported when the run fails while fetching news."""
+    stubs["x"].return_value = (_posts(8), 1830, _TREND, [], X_COST_USD)
+    stubs["news"].side_effect = RuntimeError("unexpected")
+    callback = MagicMock()
+    with pytest.raises(RuntimeError, match="^unexpected$"):
+        _call(PEPE_PROMPT, counter_callback=callback)
+    callback.assert_called_once()
+    kwargs = callback.call_args.kwargs
+    assert kwargs["call_cost"] == pytest.approx(X_COST_USD)
+    assert (kwargs["input_tokens"], kwargs["output_tokens"]) == (0, 0)
+    stubs["score"].assert_not_called()
+
+
+def test_no_cost_call_when_the_fetch_fails_before_any_paid_read(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """A fetch that fails with nothing read reports no cost."""
+    stubs["x"].side_effect = RuntimeError("unexpected")
+    callback = MagicMock()
+    with pytest.raises(RuntimeError, match="^unexpected$"):
+        _call(PEPE_PROMPT, counter_callback=callback)
+    callback.assert_not_called()
+    stubs["news"].assert_not_called()
 
 
 def test_no_source_keys_fails_before_paid_calls(stubs: Dict[str, MagicMock]) -> None:

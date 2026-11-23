@@ -102,6 +102,10 @@ SourceUnavailableError when both X and news fail, LLMResponseError for an
 empty LLM answer, TokenExtractionError when the extraction model does not name
 exactly one valid ticker for a free-text prompt, and any other exception
 (OpenAI errors included) unchanged.
+
+A failed run still reports what it used: the tokens of every LLM completion
+that came back, one cut at its token limit included, and the X and Serper cost
+collected before the failure.
 """
 
 import html
@@ -125,7 +129,7 @@ from typing import (
 )
 
 import requests
-from openai import OpenAI
+from openai import LengthFinishReasonError, OpenAI
 from pydantic import BaseModel, Field
 
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
@@ -1222,6 +1226,35 @@ def _count_source_cost(
         print(f"[token_social_sentiment] cost reporting failed: {e}")
 
 
+def _parse_completion(
+    client: OpenAI,
+    model: str,
+    counter_callback: Optional[Callable[..., Any]],
+    **params: Any,
+) -> Any:
+    """Request a structured completion and report its token usage.
+
+    A completion cut at `max_tokens` is billed like any other, and `parse`
+    raises it instead of returning it, so its usage is reported before the
+    error propagates.
+
+    :param client: OpenAI client.
+    :param model: model name.
+    :param counter_callback: mech token counter.
+    :param params: `max_tokens`, `messages` and `response_format` for `parse`.
+    :return: the OpenAI response.
+    """
+    try:
+        response = client.beta.chat.completions.parse(
+            model=model, temperature=0, **params
+        )
+    except LengthFinishReasonError as e:
+        _count_tokens(counter_callback, e.completion, model)
+        raise
+    _count_tokens(counter_callback, response, model)
+    return response
+
+
 def extract_token(
     client: OpenAI,
     model: str,
@@ -1236,14 +1269,14 @@ def extract_token(
     :param counter_callback: mech token counter.
     :return: extracted symbols (never an address).
     """
-    response = client.beta.chat.completions.parse(
-        model=model,
-        temperature=0,
+    response = _parse_completion(
+        client,
+        model,
+        counter_callback,
         max_tokens=EXTRACT_MAX_TOKENS,
         messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=text[:1000])}],
         response_format=ExtractedToken,
     )
-    _count_tokens(counter_callback, response, model)
     parsed = response.choices[0].message.parsed
     if parsed is None:
         raise LLMResponseError("LLM returned no token extraction")
@@ -1286,9 +1319,10 @@ def score_sentiment(
     # post text is unescaped HTML: keep a "</data>" in a post from closing the
     # data block
     data = data.replace("<", "\\u003c").replace(">", "\\u003e")
-    response = client.beta.chat.completions.parse(
-        model=model,
-        temperature=0,
+    response = _parse_completion(
+        client,
+        model,
+        counter_callback,
         max_tokens=SCORE_MAX_TOKENS,
         messages=[
             {"role": "system", "content": SCORE_SYSTEM_PROMPT},
@@ -1309,7 +1343,6 @@ def score_sentiment(
         ],
         response_format=ItemLabels,
     )
-    _count_tokens(counter_callback, response, model)
     parsed = response.choices[0].message.parsed
     if parsed is None:
         raise LLMResponseError("LLM returned no labels")
@@ -1713,10 +1746,13 @@ def analyze(
     result["address"] = target["address"]
     result["chain"] = target["chain"]
 
-    posts, headlines, result["mentions"], result["mentions_trend"] = _fetch_items(
-        target, api_keys, result["window_seconds"], run_state
-    )
-    _count_source_cost(counter_callback, model, run_state["cost"])
+    try:
+        posts, headlines, result["mentions"], result["mentions_trend"] = _fetch_items(
+            target, api_keys, result["window_seconds"], run_state
+        )
+    finally:
+        # the sources already read are billed whether or not the fetch completes
+        _count_source_cost(counter_callback, model, run_state["cost"])
     notes = run_state["notes"]
     result["posts_analyzed"] = 0
     result["headlines"] = []
