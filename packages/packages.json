@@ -1,8 +1,8 @@
 {
     "dev": {
-        "custom/valory/token_social_sentiment/0.1.0": "bafybeia7mroa4fhrhiofprt66bq4hdwnzrvrizz33sgbbdhekq6mx3wed4",
-        "agent/valory/mech_social/0.1.0": "bafybeibymbhunoplyfnwujabqhy2423e4yo6mldd62anaf5ow2g7hxtupe",
-        "service/valory/mech_social/0.1.0": "bafybeif4x3usfx4kwdjd3atbaahy73wngoyasjndpohppwqmd3647evcka"
+        "custom/valory/token_social_sentiment/0.1.0": "bafybeiecrjllwlkzsg3v3fabm2pychbjsecpx62ps6zr4myfr3ssbfweze",
+        "agent/valory/mech_social/0.1.0": "bafybeicvyp74asfpdfpvsep3wipgtkt3nrxl242ktqapzjhtsvaakehexi",
+        "service/valory/mech_social/0.1.0": "bafybeiajprgcyc2jhk5puty6vrp5p6a6dtokksjbmnz2dobd3xngxpb2mi"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",
@@ -42,9 +42,9 @@
         "skill/valory/registration_abci/0.1.0": "bafybeiczrxjc4dvw35q6ve2sdozqsmamqrlrhaxj5fcvajd3cmgfzx34hm",
         "skill/valory/reset_pause_abci/0.1.0": "bafybeig2zorapaqx6ubr3e63ujztidafzhstitgqdjocvec77ytr6jggzy",
         "skill/valory/termination_abci/0.1.0": "bafybeifs63hjdekvstdanmiwyo3qzyn5qegkvmjemm4poago7x6lcly7ni",
-        "skill/valory/delivery_rate_abci/0.1.0": "bafybeian7ab2avthlvzsuaj4sjuuttrbr3bbrvhaa5idgghe357o2yf4ky",
-        "skill/valory/mech_abci/0.1.0": "bafybeihr2cbzcaeckewnuwjanhlof2v7ad4lhkz5mfabvh4a6q7dtm6gvu",
-        "skill/valory/task_execution/0.1.0": "bafybeia4syvs7e3vvxww3rp5plefybsc6jgx3ldbesefleqv2c2kxlkvcq",
-        "skill/valory/task_submission_abci/0.1.0": "bafybeificmlu56btauq23fkmsr4smwpac3unv73atidgo2qfv53veyyiye"
+        "skill/valory/delivery_rate_abci/0.1.0": "bafybeib3uiiybgaufm7xyetjutmal4m7megtgdjnfx6nsbzux5j44vw6m4",
+        "skill/valory/mech_abci/0.1.0": "bafybeigq3hffnqxylyzu4vtbaqrlkk6jfd3ekbmpt3jzahgahftjlf6wtm",
+        "skill/valory/task_execution/0.1.0": "bafybeiazwbzovm5ge5y27sofszjk2nevfc7aox7nurhmgcyql6inazw5ja",
+        "skill/valory/task_submission_abci/0.1.0": "bafybeiado5zg5bp7hoikx7annu4xyflrsnaybdisgsiutra6h2c35ensdu"
     }
 }
