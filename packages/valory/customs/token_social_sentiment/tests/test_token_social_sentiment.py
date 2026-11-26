@@ -20,11 +20,14 @@
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
+import openai
 import pytest
 import requests
+import yaml
 
 from packages.valory.customs.token_social_sentiment import (
     token_social_sentiment as tool,
@@ -40,6 +43,12 @@ KEYS = {"openai": "sk", "serperapi": "serper", "x_bearer": "x"}
 _TAIL = f"{tool.X_QUERY_EXCLUSIONS} -is:retweet"
 _TREND = {"recent": 10, "previous": 5}
 PEPE_PROMPT = json.dumps({"symbol": "PEPE", "address": ADDRESS})
+# the OpenAI exceptions only store the HTTP request and response they carry
+OPENAI_REQUEST = MagicMock(name="openai_request")
+OPENAI_RATE_LIMITED = MagicMock(status_code=429, request=OPENAI_REQUEST)
+# the stubs fixture patches score_sentiment; tests that need the real one
+# restore it from here
+REAL_SCORE_SENTIMENT = tool.score_sentiment
 
 
 def _posts(n: int) -> List[Dict[str, Any]]:
@@ -85,14 +94,19 @@ def _search_note(
     )
 
 
-def _run(prompt: str, keys: Any = None, **kwargs: Any) -> Dict:
-    """Run the tool and decode its JSON result."""
-    response = tool.run(
+def _call(prompt: str, keys: Any = None, **kwargs: Any) -> Any:
+    """Call the tool's run with the default tool name and keys."""
+    return tool.run(
         tool="token_social_sentiment",
         prompt=prompt,
         api_keys=KEYS if keys is None else keys,
         **kwargs,
     )
+
+
+def _run(prompt: str, keys: Any = None, **kwargs: Any) -> Dict:
+    """Run the tool and decode its JSON result."""
+    response = _call(prompt, keys, **kwargs)
     assert isinstance(response, tuple) and len(response) == 5
     result = json.loads(response[0])
     assert tuple(result.keys()) == tool.OUTPUT_KEYS
@@ -132,7 +146,6 @@ def stubs() -> Any:
 def test_structured_happy_path(stubs: Dict[str, MagicMock]) -> None:
     """Counts, headlines and top posts come from per-item labels."""
     result = _run(json.dumps({"symbol": "pepe", "address": ADDRESS}))
-    assert result["error"] is None
     assert result["token"] == "PEPE"
     assert result["chain"] == "ethereum"
     assert result["mentions"] == 1830
@@ -195,14 +208,16 @@ def test_free_text_cashtag_without_address_is_checked(
     stubs["extract"].assert_called_once()
 
 
-def test_cashtag_and_named_token_rejected(stubs: Dict[str, MagicMock]) -> None:
-    """A cashtag plus a token named in words is two tokens, not the cashtag one."""
+def test_cashtag_and_named_token_is_an_extraction_fault(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """A second ticker from the extraction model is the mech's side."""
     stubs["extract"].return_value = tool.ExtractedToken(symbols=["ETH"])
-    result = _run("Compare $BTC and Ethereum")
-    assert result["error"] == {
-        "type": "invalid_input",
-        "message": "one token per request, found 2: BTC, ETH",
-    }
+    with pytest.raises(
+        tool.TokenExtractionError, match="^token extraction found 2 tokens: BTC, ETH$"
+    ):
+        _call("Compare $BTC and Ethereum")
+    stubs["x"].assert_not_called()
 
 
 def test_free_text_uses_llm_extraction(stubs: Dict[str, MagicMock]) -> None:
@@ -224,15 +239,56 @@ def test_address_only_taken_verbatim_from_text(stubs: Dict[str, MagicMock]) -> N
 
 @pytest.mark.parametrize(
     "prompt",
-    ["$PEPE or $DOGE?", "compare pepe and doge", f"{ADDRESS} vs {OTHER_ADDRESS}"],
+    ["$PEPE or $DOGE?", f"{ADDRESS} vs {OTHER_ADDRESS}"],
 )
-def test_two_tokens_rejected(stubs: Dict[str, MagicMock], prompt: str) -> None:
-    """Free text naming two tokens is rejected, not silently truncated."""
-    stubs["extract"].return_value = tool.ExtractedToken(symbols=["PEPE", "DOGE"])
-    result = _run(prompt)
-    assert result["error"]["type"] == "invalid_input"
-    assert "one token per request" in result["error"]["message"]
-    assert result["degraded_sources"] == []
+def test_two_tokens_in_buyer_text_rejected(
+    stubs: Dict[str, MagicMock], prompt: str
+) -> None:
+    """Two cashtags or addresses written in the text are the buyer's input."""
+    stubs["extract"].return_value = tool.ExtractedToken(symbols=["PEPE"])
+    with pytest.raises(tool.InvalidRequestError, match="one token per request"):
+        _call(prompt)
+    stubs["extract"].assert_not_called()
+    stubs["x"].assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "prompt,symbols,message",
+    [
+        ("compare pepe and doge", ["PEPE", "DOGE"], "found 2 tokens: DOGE, PEPE"),
+        ("pepe on robinhood", ["PEPE", "ROBINHOOD"], "found 2 tokens"),
+        ("how is pepe doing", ["PEPE", "pepe", ""], None),
+        ("how is pepe doing", [], "found no token"),
+        ("[1, 2]", [], "found no token"),
+        ("how is pepe doing", ["PE PE"], "invalid symbol: 'PE PE'"),
+        ("how is pepe doing", ["PEPE", "1PEPE"], "invalid symbol: '1PEPE'"),
+    ],
+)
+def test_extraction_model_answer_is_mech_side(
+    stubs: Dict[str, MagicMock],
+    prompt: str,
+    symbols: List[str],
+    message: Optional[str],
+) -> None:
+    """Anything but one valid ticker from the model is a mech-side fault."""
+    stubs["extract"].return_value = tool.ExtractedToken(symbols=symbols)
+    if message is None:
+        assert _run(prompt)["token"] == "PEPE"
+        return
+    with pytest.raises(tool.TokenExtractionError, match=message):
+        _call(prompt)
+    for name in ("resolve", "x", "news", "score"):
+        stubs[name].assert_not_called()
+
+
+def test_model_miss_with_address_in_text_still_runs(
+    stubs: Dict[str, MagicMock],
+) -> None:
+    """An address in the text is enough when the model names no ticker."""
+    stubs["extract"].return_value = tool.ExtractedToken(symbols=[])
+    result = _run(f"how is {ADDRESS} doing")
+    assert result["address"] == ADDRESS
+    assert result["token"] == "PEPE"
 
 
 def test_same_token_twice_is_one_token(stubs: Dict[str, MagicMock]) -> None:
@@ -247,30 +303,52 @@ def test_same_token_twice_is_one_token(stubs: Dict[str, MagicMock]) -> None:
     [
         ("", "empty prompt"),
         ("{bad json", "not valid JSON"),
-        ("[1, 2]", "no token symbol"),
         (json.dumps({"symbol": "PE PE"}), "invalid symbol"),
         (json.dumps({"address": "0x123"}), "invalid contract address"),
         (json.dumps({"symbol": "PEPE", "window_seconds": "1d"}), "integer"),
         (json.dumps({"symbol": "PONS", "chain": "arc) OR (x"}), "invalid chain"),
         (json.dumps({}), "no token symbol"),
         (json.dumps({"symbol": "", "address": ""}), "no token symbol"),
+        (json.dumps({"symbol": "PEPE", "window_seconds": True}), "integer"),
+        (json.dumps({"symbol": 7}), "invalid symbol"),
+        (json.dumps({"symbol": "PEPE", "chain": 1}), "invalid chain"),
+        ("   ", "empty prompt"),
     ],
 )
 def test_invalid_input(stubs: Dict[str, MagicMock], prompt: str, message: str) -> None:
-    """Bad input returns invalid_input with all data null."""
+    """Bad input raises InvalidRequestError before any source is read."""
     stubs["extract"].return_value = tool.ExtractedToken(symbols=[])
-    result = _run(prompt)
-    assert result["error"]["type"] == "invalid_input"
-    assert message in result["error"]["message"]
-    assert result["sentiment"] is None
-    assert result["warnings"] == []
+    with pytest.raises(tool.InvalidRequestError, match=message):
+        _call(prompt)
+    for name in ("resolve", "x", "news", "score"):
+        stubs[name].assert_not_called()
+
+
+def test_invalid_request_error_matches_the_mech_contract() -> None:
+    """The mech recognises a client-side error by this exact class name."""
+    assert tool.InvalidRequestError.__name__ == "InvalidRequestError"
+    assert issubclass(tool.InvalidRequestError, ValueError)
+
+
+@pytest.mark.parametrize(
+    "error_cls",
+    [
+        tool.MissingAPIKeyError,
+        tool.SourceUnavailableError,
+        tool.LLMResponseError,
+        tool.TokenExtractionError,
+    ],
+)
+def test_mech_side_errors_are_not_invalid_request(error_cls: type) -> None:
+    """Failures on the mech's side never carry the client-side class name."""
+    assert error_cls.__name__ != "InvalidRequestError"
+    assert not issubclass(error_cls, tool.InvalidRequestError)
 
 
 def test_empty_chain_is_not_given(stubs: Dict[str, MagicMock]) -> None:
     """An empty chain string means no chain, not an invalid one."""
     stubs["resolve"].return_value = {}
     result = _run(json.dumps({"symbol": "PEPE", "chain": ""}))
-    assert result["error"] is None
     assert result["chain"] is None
 
 
@@ -320,7 +398,6 @@ def test_address_wins_on_symbol_and_chain_mismatch(stubs: Dict[str, MagicMock]) 
     # the same text stays in reasoning for human readers
     assert "(address belongs to PEPE2)" in result["reasoning"]
     assert "Requested chain ethereum does not match" in result["reasoning"]
-    assert result["error"] is None
 
 
 def test_token_lookup_failure_is_degraded_and_noted(
@@ -329,7 +406,6 @@ def test_token_lookup_failure_is_degraded_and_noted(
     """A DexScreener failure is reported, not silently read as 'not shared'."""
     stubs["resolve"].return_value = None
     result = _run(PEPE_PROMPT)
-    assert result["error"] is None
     assert result["degraded_sources"] == ["dexscreener"]
     assert result["warnings"] == []
     assert "Token lookup failed" in result["reasoning"]
@@ -578,7 +654,6 @@ def test_one_source_failing_continues(stubs: Dict[str, MagicMock]) -> None:
         bullish=["n1", "n2", "n3"], neutral=["n4", "n5"]
     )
     result = _run(PEPE_PROMPT)
-    assert result["error"] is None
     assert result["posts_analyzed"] == 0
     assert result["breakdown"] == {"bullish": 3, "neutral": 2, "bearish": 0}
     assert result["sentiment"] == 0.6
@@ -610,32 +685,32 @@ def test_missing_x_key_continues(stubs: Dict[str, MagicMock]) -> None:
         PEPE_PROMPT,
         keys={"openai": "sk", "serperapi": "s"},
     )
-    assert result["error"] is None
     assert result["degraded_sources"] == ["x"]
     stubs["x"].assert_not_called()
 
 
-@pytest.mark.parametrize("keys", [{"serperapi": "s", "x_bearer": "x"}, None])
-def test_missing_openai_key_is_internal_error(
-    stubs: Dict[str, MagicMock], keys: Any
-) -> None:
-    """No OpenAI key (or no api_keys at all) returns an internal error."""
-    response = tool.run(
-        tool="token_social_sentiment",
-        prompt=json.dumps({"symbol": "PEPE"}),
-        api_keys=keys,
-    )
-    result = json.loads(response[0])
-    assert result["error"]["type"] == "internal"
+@pytest.mark.parametrize(
+    "keys",
+    [{"serperapi": "s", "x_bearer": "x"}, {"openai": "", "x_bearer": "x"}, None],
+)
+def test_missing_openai_key_raises(stubs: Dict[str, MagicMock], keys: Any) -> None:
+    """No OpenAI key (empty, absent, or no api_keys at all) raises, no call made."""
+    with pytest.raises(tool.MissingAPIKeyError, match="^missing openai API key$"):
+        tool.run(
+            tool="token_social_sentiment",
+            prompt=json.dumps({"symbol": "PEPE"}),
+            api_keys=keys,
+        )
+    stubs["x"].assert_not_called()
 
 
-def test_both_sources_failing(stubs: Dict[str, MagicMock]) -> None:
-    """Both sources failing returns source_unavailable with degraded list."""
+def test_both_sources_failing_raises(stubs: Dict[str, MagicMock]) -> None:
+    """Both sources failing raises out of run, before any scoring call."""
     stubs["x"].side_effect = requests.ConnectionError("down")
     stubs["news"].side_effect = requests.Timeout("slow")
-    result = _run(PEPE_PROMPT)
-    assert result["error"]["type"] == "source_unavailable"
-    assert result["degraded_sources"] == ["x", "news"]
+    with pytest.raises(tool.SourceUnavailableError, match="both X and news"):
+        tool.run(tool="token_social_sentiment", prompt=PEPE_PROMPT, api_keys=KEYS)
+    stubs["score"].assert_not_called()
 
 
 def test_no_data_is_not_an_error(stubs: Dict[str, MagicMock]) -> None:
@@ -643,7 +718,6 @@ def test_no_data_is_not_an_error(stubs: Dict[str, MagicMock]) -> None:
     stubs["x"].return_value = ([], 0, _TREND, [], 0.0)
     stubs["news"].return_value = []
     result = _run(json.dumps({"symbol": "NEWTOKEN", "address": ADDRESS}))
-    assert result["error"] is None
     assert result["sentiment"] is None
     assert result["top_posts"] == []
     assert result["headlines"] == []
@@ -681,7 +755,6 @@ def test_too_few_on_topic_gives_null_sentiment(
     """Fewer than MIN_ON_TOPIC_ITEMS valid on-topic items gives no score."""
     stubs["score"].return_value = labels
     result = _run(PEPE_PROMPT)
-    assert result["error"] is None
     assert result["sentiment"] is None
     assert result["breakdown"] is None
     assert "too few for a reliable score" in result["reasoning"]
@@ -730,30 +803,81 @@ def test_tally_drops_unknown_and_conflicting_ids() -> None:
     }
 
 
-def test_llm_error(stubs: Dict[str, MagicMock]) -> None:
-    """An OpenAI failure returns llm_error."""
-    stubs["score"].side_effect = tool.openai.OpenAIError("boom")
-    result = _run(PEPE_PROMPT)
-    assert result["error"]["type"] == "llm_error"
+@pytest.mark.parametrize(
+    "llm_failure,raised",
+    [
+        (openai.APIConnectionError(request=OPENAI_REQUEST), openai.APIConnectionError),
+        (openai.APITimeoutError(request=OPENAI_REQUEST), openai.APITimeoutError),
+        (
+            openai.RateLimitError(
+                "rate limited", response=OPENAI_RATE_LIMITED, body=None
+            ),
+            openai.RateLimitError,
+        ),
+    ],
+    ids=["connection", "timeout", "rate-limit"],
+)
+def test_openai_failure_raises_out_of_run(
+    stubs: Dict[str, MagicMock], llm_failure: Exception, raised: type
+) -> None:
+    """An OpenAI client failure while scoring propagates out of run."""
+    with (
+        patch.object(tool, "OpenAI") as client_cls,
+        patch.object(tool, "score_sentiment", REAL_SCORE_SENTIMENT),
+    ):
+        client_cls.return_value.beta.chat.completions.parse.side_effect = llm_failure
+        with pytest.raises(raised):
+            tool.run(tool="token_social_sentiment", prompt=PEPE_PROMPT, api_keys=KEYS)
 
 
-def test_unexpected_exception_is_internal(stubs: Dict[str, MagicMock]) -> None:
-    """Any other exception returns internal instead of raising."""
+def test_empty_llm_answer_raises_out_of_run(stubs: Dict[str, MagicMock]) -> None:
+    """A scoring answer without labels propagates out of run."""
+    with (
+        patch.object(tool, "OpenAI") as client_cls,
+        patch.object(tool, "score_sentiment", REAL_SCORE_SENTIMENT),
+    ):
+        client_cls.return_value = _parse_client(None)
+        with pytest.raises(tool.LLMResponseError, match="no labels"):
+            tool.run(tool="token_social_sentiment", prompt=PEPE_PROMPT, api_keys=KEYS)
+
+
+def test_unexpected_exception_raises_out_of_run(stubs: Dict[str, MagicMock]) -> None:
+    """Any other exception propagates out of run unchanged."""
     stubs["score"].side_effect = KeyError("x")
-    result = _run(PEPE_PROMPT)
-    assert result["error"]["type"] == "internal"
+    with pytest.raises(KeyError):
+        tool.run(tool="token_social_sentiment", prompt=PEPE_PROMPT, api_keys=KEYS)
 
 
-def test_model_not_allowed() -> None:
-    """Requester-chosen models outside the allow-list are rejected."""
-    result = _run(json.dumps({"symbol": "PEPE"}), model="o3-pro")
-    assert result["error"]["type"] == "invalid_input"
+def test_model_not_allowed(stubs: Dict[str, MagicMock]) -> None:
+    """Requester-chosen models outside the allow-list raise before any call."""
+    with pytest.raises(tool.InvalidRequestError, match="^model not supported: o3-pro$"):
+        _call(json.dumps({"symbol": "PEPE"}), model="o3-pro")
+    stubs["resolve"].assert_not_called()
 
 
-def test_unknown_tool_raises() -> None:
-    """An unsupported tool name raises like the other tools."""
-    with pytest.raises(ValueError):
-        tool.run(tool="other", prompt="x", api_keys=KEYS)
+def test_allowed_model_is_served(stubs: Dict[str, MagicMock]) -> None:
+    """A model in the allow-list runs normally."""
+    model = sorted(tool.ALLOWED_MODELS)[0]
+    assert _run(json.dumps({"symbol": "PEPE"}), model=model)["token"] == "PEPE"
+
+
+def test_component_default_model_is_the_tool_default_and_allowed() -> None:
+    """The model the mech fills in for a request without one is served by the tool."""
+    component = yaml.safe_load(
+        Path(tool.__file__).with_name("component.yaml").read_text(encoding="utf-8")
+    )
+    assert component["params"]["default_model"] == tool.DEFAULT_MODEL
+    assert tool.DEFAULT_MODEL in tool.ALLOWED_MODELS
+
+
+@pytest.mark.parametrize("tool_name", ["other", "", None])
+def test_unknown_tool_is_an_invalid_request(
+    stubs: Dict[str, MagicMock], tool_name: Any
+) -> None:
+    """An unsupported tool name is a fault in the request; nothing is called."""
+    with pytest.raises(tool.InvalidRequestError, match="is not supported"):
+        tool.run(tool=tool_name, prompt=PEPE_PROMPT, api_keys=KEYS)
+    stubs["resolve"].assert_not_called()
 
 
 def test_openai_client_has_timeout(stubs: Dict[str, MagicMock]) -> None:
@@ -812,8 +936,8 @@ def test_score_sentiment_builds_prompt_and_counts_tokens() -> None:
     assert callback.call_args.kwargs["input_tokens"] == 12
 
 
-def test_score_sentiment_parsed_none_is_llm_error() -> None:
-    """A refusal (parsed None) surfaces as llm_error."""
+def test_score_sentiment_parsed_none_raises() -> None:
+    """A refusal (parsed None) raises LLMResponseError."""
     client = _parse_client(None)
     target: Dict[str, Any] = {
         "token": "PONS",
@@ -823,13 +947,12 @@ def test_score_sentiment_parsed_none_is_llm_error() -> None:
         "user_text": "q",
         "notes": [],
     }
-    with pytest.raises(tool.ToolError) as err:
+    with pytest.raises(tool.LLMResponseError, match="no labels"):
         tool.score_sentiment(client, tool.DEFAULT_MODEL, target, [], [], None)
-    assert err.value.error_type == "llm_error"
 
 
 def test_extract_token_formats_prompt_and_handles_none() -> None:
-    """extract_token sends the user text and maps a refusal to llm_error."""
+    """extract_token sends the user text and raises on a refusal."""
     extracted = tool.ExtractedToken(symbols=["PEPE"])
     client = _parse_client(extracted)
     assert (
@@ -838,7 +961,7 @@ def test_extract_token_formats_prompt_and_handles_none() -> None:
     kwargs = client.beta.chat.completions.parse.call_args.kwargs
     assert "how is pepe" in kwargs["messages"][0]["content"]
     assert kwargs["max_tokens"] == tool.EXTRACT_MAX_TOKENS
-    with pytest.raises(tool.ToolError):
+    with pytest.raises(tool.LLMResponseError, match="no token extraction"):
         tool.extract_token(_parse_client(None), tool.DEFAULT_MODEL, "x", None)
 
 
@@ -1518,7 +1641,6 @@ def test_x_partial_and_counts_notes(stubs: Dict[str, MagicMock]) -> None:
 def test_missing_serper_key_continues(stubs: Dict[str, MagicMock]) -> None:
     """No Serper key behaves like news being unavailable."""
     result = _run(PEPE_PROMPT, keys={"openai": "sk", "x_bearer": "x"})
-    assert result["error"] is None
     assert result["degraded_sources"] == ["news"]
     stubs["news"].assert_not_called()
 
@@ -1784,7 +1906,7 @@ def test_no_source_cost_no_callback_call(stubs: Dict[str, MagicMock]) -> None:
     result = _run(
         PEPE_PROMPT, keys={"openai": "sk", "x_bearer": "x"}, counter_callback=callback
     )
-    assert result["error"] is None
+    assert result["degraded_sources"] == ["news"]
     callback.assert_not_called()
 
 
@@ -1811,22 +1933,24 @@ class _EmptyKeyChain:
 
 
 @pytest.mark.parametrize(
-    "service,error,degraded",
-    [
-        ("x_bearer", None, ["x"]),
-        ("serperapi", None, ["news"]),
-        ("openai", {"type": "internal", "message": "missing openai API key"}, []),
-    ],
+    "service,degraded",
+    [("x_bearer", ["x"]), ("serperapi", ["news"])],
 )
-def test_service_with_empty_key_list(
-    stubs: Dict[str, MagicMock], service: str, error: Any, degraded: List[str]
+def test_source_with_empty_key_list_degrades(
+    stubs: Dict[str, MagicMock], service: str, degraded: List[str]
 ) -> None:
-    """An empty key list never raises: sources degrade, no openai key is internal."""
+    """An empty key list for one source degrades that source."""
     services = {"openai": ["sk"], "serperapi": ["s"], "x_bearer": ["x"]}
     services[service] = []
     result = _run(PEPE_PROMPT, keys=_EmptyKeyChain(services))
-    assert result["error"] == error
     assert result["degraded_sources"] == degraded
+
+
+def test_openai_with_empty_key_list_raises(stubs: Dict[str, MagicMock]) -> None:
+    """An empty openai key list raises MissingAPIKeyError."""
+    keys = _EmptyKeyChain({"openai": [], "serperapi": ["s"], "x_bearer": ["x"]})
+    with pytest.raises(tool.MissingAPIKeyError, match="openai"):
+        _call(PEPE_PROMPT, keys=keys)
 
 
 def test_post_text_cannot_close_the_data_block() -> None:
@@ -1895,22 +2019,21 @@ def test_cost_reporting_failure_does_not_fail_the_request(
     stubs["x"].return_value = (_posts(8), 1830, _TREND, [], 0.205)
     callback = MagicMock(side_effect=TypeError("unexpected keyword call_cost"))
     result = _run(PEPE_PROMPT, counter_callback=callback)
-    assert result["error"] is None
     assert result["sentiment"] is not None
 
 
 def test_no_source_keys_fails_before_paid_calls(stubs: Dict[str, MagicMock]) -> None:
-    """Without X and news keys nothing is fetched or sent to the LLM."""
-    result = _run("How is $PEPE doing?", keys={"openai": "sk"})
-    assert result["error"]["type"] == "source_unavailable"
+    """Without X and news keys it raises; nothing is fetched or sent to the LLM."""
+    with pytest.raises(tool.MissingAPIKeyError, match="^no X or news API key$"):
+        _call("How is $PEPE doing?", keys={"openai": "sk", "x_bearer": ""})
     for name in ("resolve", "search", "x", "news", "score", "extract"):
         stubs[name].assert_not_called()
 
 
 def test_symbol_with_trailing_newline_is_rejected(stubs: Dict[str, MagicMock]) -> None:
     """A symbol must match exactly; a newline cannot reach the X query."""
-    result = _run(json.dumps({"symbol": "PEPE\n"}))
-    assert result["error"]["type"] == "invalid_input"
+    with pytest.raises(tool.InvalidRequestError, match="invalid symbol"):
+        _call(json.dumps({"symbol": "PEPE\n"}))
     stubs["x"].assert_not_called()
 
 
@@ -1928,7 +2051,6 @@ def test_address_not_listed_is_a_warning(
     """An address DexScreener does not list is flagged; the request still runs."""
     stubs["resolve"].return_value = {}
     result = _run(prompt)
-    assert result["error"] is None
     assert result["token"] == token
     assert result["warnings"] == [
         {
@@ -1939,15 +2061,6 @@ def test_address_not_listed_is_a_warning(
     ]
     assert result["reasoning"].startswith("Contract address not found")
     assert result["degraded_sources"] == []
-
-
-def test_warnings_kept_on_error(stubs: Dict[str, MagicMock]) -> None:
-    """A warning found before a later failure is still returned."""
-    stubs["resolve"].return_value = {**STOCK_INFO, "symbol": "PEPE2", "stock": False}
-    stubs["score"].side_effect = tool.ToolError("llm_error", "LLM returned no labels")
-    result = _run(PEPE_PROMPT)
-    assert result["error"]["type"] == "llm_error"
-    assert [w["type"] for w in result["warnings"]] == ["symbol_mismatch"]
 
 
 def test_resolve_token_prefers_requested_chain(monkeypatch: Any) -> None:

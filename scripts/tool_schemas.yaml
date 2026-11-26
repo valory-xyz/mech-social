@@ -53,9 +53,15 @@ defaults:
               busier_token_same_ticker (a thin or unlisted address; the
               message names the token with the most DEX volume for the ticker).
               degraded_sources: sources that failed while a result was still
-              produced (x, x_partial, x_counts, x_trend, news, dexscreener). error: null
-              or {type, message}, type invalid_input, source_unavailable,
-              llm_error or internal.
+              produced (x, x_partial, x_counts, x_trend, news, dexscreener).
+              A failed run returns no result. Bad input, an unsupported tool
+              or an unsupported model is a client-side error
+              (InvalidRequestError); missing keys, no source or LLM answer,
+              or the model not reading exactly one ticker from free text is a
+              failure on the mech's side. Off-chain, the mech reports a
+              failed run with an error and a fault field. On-chain, result is
+              then the error as plain text ("<ErrorType>: <message>"), not
+              this JSON.
             example: |-
               {
                 "token": "ABC",
@@ -78,8 +84,7 @@ defaults:
                 ],
                 "headlines": [{"title": "ABC lists on a new exchange", "url": "https://example.com/abc"}],
                 "warnings": [],
-                "degraded_sources": [],
-                "error": null
+                "degraded_sources": []
               }
           prompt:
             type: string

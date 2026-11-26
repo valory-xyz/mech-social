@@ -60,11 +60,20 @@ calls:
 | [X API](https://docs.x.com/x-api) (`api.x.com`) | Recent post search and post counts | `x_bearer` | The tool continues with news only and reports `x`, `x_partial`, or `x_counts` in `degraded_sources`. |
 | [Serper](https://serper.dev/) (`google.serper.dev`) | News headlines | `serperapi` | The tool continues with X posts only and reports `news` in `degraded_sources`. |
 | [DexScreener](https://docs.dexscreener.com/) (`api.dexscreener.com`) | Token symbol, address, and chain verification | None | The tool continues with unverified input and reports `dexscreener` in `degraded_sources`. |
-| [OpenAI API](https://platform.openai.com/docs) | Token extraction from free text and sentiment labels | `openai` | The request fails with an `llm_error` error. Without a key, the request fails with an `internal` error. |
+| [OpenAI API](https://platform.openai.com/docs) | Token extraction from free text and sentiment labels | `openai` | The run raises, so the mech rejects it. Without a key, the run raises before any service is called. |
 
-If both X and Serper fail, or if the `API_KEYS` variable has neither an
-`x_bearer` key nor a `serperapi` key, the request fails with a
-`source_unavailable` error.
+If both X and Serper fail, the run raises, so the mech rejects it. If the
+`API_KEYS` variable has neither an `x_bearer` key nor a `serperapi` key, the
+run raises before any service is called. The tool returns a result only when
+it has one, so a failed run is never delivered as an answer.
+
+A run that fails because of the request itself raises `InvalidRequestError`, a
+`ValueError`: bad input, an unsupported tool name or an unsupported model. The
+mech treats that class name as a client-side error and charges the buyer's
+signed maximum. Every other exception, such as a missing key, both sources
+failing, an OpenAI error, or the model reading a second ticker or none from
+free text, is a failure on the mech's side, and the mech charges only its small
+minimum.
 
 None of these services has a fallback provider. The tool doesn't hold or move
 funds. Review this list at each release.
